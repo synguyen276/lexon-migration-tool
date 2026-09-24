@@ -210,7 +210,10 @@ public class CmsClassMapper(
                 break;
             }
 
-            // Target Content,Website
+            // ---------------------------------------------------------------------------------
+            // FLOW 1: Page Type -> Content Type mapping
+            // Handles CMS_Class with ClassIsDocumentType = true (legacy Page Types) and cms.folder
+            // ---------------------------------------------------------------------------------
             case { ClassName: { } className } when className.Equals("cms.folder", StringComparison.InvariantCultureIgnoreCase):
             case
             {
@@ -219,11 +222,16 @@ public class CmsClassMapper(
                 // ClassIsPage: true
             }:
             {
+                // In Xperience by Kentico, page types become Content Types
                 target.ClassType = ClassType.CONTENT_TYPE;
+
+                // Determine whether this content type is a Reusable Content Item (Content Hub)
+                // or a Website Channel Page (Web Page) based on appsettings configuration:
                 target.ClassContentTypeType = configuration.ClassNamesConvertToContentHub.Contains(target.ClassName)
                     ? ClassContentTypeType.REUSABLE
                     : ClassContentTypeType.WEBSITE;
 
+                // Patch schema: injects required XbyK system metadata fields, ensures proper PK and GUIDs
                 target = PatchDataClassInfo(target, existingFieldGUIDs, modelFacade.SelectVersion(), configuration.IncludeExtendedMetadata.GetValueOrDefault(false) ? IncludedMetadata.Extended : IncludedMetadata.Basic, out string? oldPrimaryKeyName, out string? documentNameField);
                 break;
             }

@@ -21,6 +21,26 @@ using Migration.Tool.Source.Services;
 
 namespace Migration.Tool.Source.Handlers;
 
+/// <summary>
+/// =========================================================================================
+/// FLOW 1: MIGRATE PAGE TYPE -> CONTENT TYPE (CLI: migrate --page-types)
+/// =========================================================================================
+/// This handler orchestrates the migration of legacy Kentico 12/13 Page Types (CMS_Class where
+/// ClassIsDocumentType = 1) into Xperience by Kentico (XbyK) Content Types.
+///
+/// Execution Stages:
+///   1. Query source page types from CMS_Class (ordered and deferrable for inheritance).
+///   2. Apply exclusions (CMS.Root, CMS.Site, appsettings ExcludeCodeNames).
+///   3. Resolve inheritance dependencies (defer derived types until parent types exist).
+///   4. Map schema & form definitions (CmsClassMapper) into XbyK DataClassInfo:
+///        - ClassContentTypeType.REUSABLE (Content Hub item) if listed in ClassNamesConvertToContentHub
+///        - ClassContentTypeType.WEBSITE (Web page item) otherwise
+///   5. Save to target database via KXP Class Facade.
+///   6. Channel assignment: For WEBSITE types, link to channels via ContentTypeChannelInfo.
+///   7. Migrate Page Template configurations.
+///   8. Bypass or configure allowed child content types.
+/// =========================================================================================
+/// </summary>
 public class MigratePageTypesCommandHandler(
     ILogger<MigratePageTypesCommandHandler> logger,
     IEntityMapper<ICmsClass, DataClassInfo> dataClassMapper,
@@ -43,11 +63,17 @@ public class MigratePageTypesCommandHandler(
     {
         var entityConfiguration = toolConfiguration.EntityConfigurations.GetEntityConfiguration<DataClassInfo>();
 
+        // ---------------------------------------------------------------------------------
+        // STAGE 1: Load all source Page Types (CMS_Class where ClassIsDocumentType = 1)
+        // Wrapped in DeferrableItemWrapper so classes whose inheritance parents are not yet
+        // migrated can be deferred and re-evaluated at the end of the loop.
+        // ---------------------------------------------------------------------------------
         using var ksClasses = EnumerableHelper.CreateDeferrableItemWrapper(
             modelFacade.Select<ICmsClass>("ClassIsDocumentType=1", "ClassID")
                 .OrderBy(x => x.ClassID)
         );
 
+        // Check for custom manual class mappings or reusable schema builders
         var manualMappings = classMappingProvider.ExecuteMappings();
         var manuallyMappedSourceClassIDs = new HashSet<int>();
         var manuallyMappedSourceClassNames = manualMappings.Values.SelectMany(x => x.mappping.SourceClassNames).ToHashSet();
@@ -60,6 +86,9 @@ public class MigratePageTypesCommandHandler(
             return new CommandFailureResult();
         }
 
+        // ---------------------------------------------------------------------------------
+        // STAGE 2: Iterate and process each page type
+        // ---------------------------------------------------------------------------------
         while (ksClasses.GetNext(out var di))
         {
             var (_, ksClass) = di;
@@ -69,17 +98,20 @@ public class MigratePageTypesCommandHandler(
                 manuallyMappedSourceClassIDs.Add(ksClass.ClassID);
             }
 
+            // Skip classes handled by custom manual class mappings
             if (manualMappings.ContainsKey(ksClass.ClassName))
             {
                 continue;
             }
 
+            // Skip classes explicitly excluded in appsettings.json
             if (entityConfiguration.ExcludeCodeNames.Contains(ksClass.ClassName, StringComparer.InvariantCultureIgnoreCase))
             {
                 logger.LogInformation("Class {ClassName} explicitly excluded in appsettings", ksClass.ClassName);
                 continue;
             }
 
+            // Skip classes converted via reusable schema builders without custom mapping
             var producedReusableSchemas = reusableSchemaBuilders.Where(x =>
                 string.Equals(x.SourceClassName, ksClass.ClassName, StringComparison.InvariantCultureIgnoreCase)).ToArray();
             if (producedReusableSchemas.Length != 0)  // and no custom mapping is registered for this class, but that is assured by one of the previous guards
@@ -90,9 +122,15 @@ public class MigratePageTypesCommandHandler(
                 continue;
             }
 
+            // ---------------------------------------------------------------------------------
+            // STAGE 3: Class Inheritance Dependency Check
+            // If this class inherits from another class (ClassInheritsFromClassID), ensure the
+            // parent class has already been migrated in the target instance. If not, defer this
+            // class to be re-evaluated later once its parent is created.
+            // ---------------------------------------------------------------------------------
             if (ksClass.ClassInheritsFromClassID is { } classInheritsFromClassId && !(primaryKeyMappingContext.HasMapping<ICmsClass>(c => c.ClassID, classInheritsFromClassId) || manuallyMappedSourceClassIDs.Contains(classInheritsFromClassId)))
             {
-                // defer migration to later stage
+                // Defer migration to later stage
                 if (ksClasses.TryDeferItem(di))
                 {
                     logger.LogTrace("Class {Class} inheritance parent not found, deferring migration to end. Attempt {Attempt}", Printer.GetEntityIdentityPrint(ksClass), di.Recurrence);
@@ -111,6 +149,7 @@ public class MigratePageTypesCommandHandler(
 
             protocol.FetchedSource(ksClass);
 
+            // Filter out system classes that cannot or should not be migrated as page types
             if (string.Equals(ksClass.ClassName, CLASS_CMS_ROOT, StringComparison.InvariantCultureIgnoreCase))
             {
                 protocol.Warning(HandbookReferences.CmsClassCmsRootClassTypeSkip, ksClass);
@@ -123,6 +162,7 @@ public class MigratePageTypesCommandHandler(
                 continue;
             }
 
+            // Handle legacy CMS.Folder (skipped unless UseDeprecatedFolderPageType is explicitly true)
             if (ksClass.ClassName.Equals("cms.folder", StringComparison.InvariantCultureIgnoreCase))
             {
                 if (!toolConfiguration.UseDeprecatedFolderPageType.GetValueOrDefault(false))
@@ -134,11 +174,20 @@ public class MigratePageTypesCommandHandler(
                 logger.LogWarning("Class {Class} is deprecated, but migration is enabled with configuration flag 'UseDeprecatedFolderPageType'", Printer.GetEntityIdentityPrint(ksClass));
             }
 
+            // ---------------------------------------------------------------------------------
+            // STAGE 4: Map and save Page Type into XbyK Content Type
+            // ---------------------------------------------------------------------------------
             var kxoDataClass = kxpClassFacade.GetClass(ksClass.ClassGUID);
             protocol.FetchedTarget(kxoDataClass);
 
             if (SaveUsingKxoApi(ksClass, kxoDataClass) is { } targetClass)
             {
+                // ---------------------------------------------------------------------------------
+                // STAGE 5: Channel Assignment for Website Content Types
+                // In KX12/13, page types were assigned to Sites via CMS_ClassSite.
+                // In XbyK, Website Content Types must be assigned to Website Channels via
+                // ContentTypeChannelInfo. We look up the channel matching each source site GUID.
+                // ---------------------------------------------------------------------------------
                 if (targetClass.ClassContentTypeType is ClassContentTypeType.WEBSITE)
                 {
                     foreach (var cmsClassSite in modelFacade.SelectWhere<ICmsClassSite>("ClassID = @classId", new SqlParameter("classId", ksClass.ClassID)))
@@ -164,11 +213,17 @@ public class MigratePageTypesCommandHandler(
             }
         }
 
+        // ---------------------------------------------------------------------------------
+        // STAGE 6: Migrate Page Template Configurations
+        // Migrates template settings defined for page types in KX12/KX13
+        // ---------------------------------------------------------------------------------
         await MigratePageTemplateConfigurations();
 
-        // By default all restrictions are bypassed.
-        // To migrate the restrictions, include --type-restrictions in your migrate command,
-        // which will migrate the actual restrictions in the next stage
+        // ---------------------------------------------------------------------------------
+        // STAGE 7: Bypass Allowed Child Content Types
+        // By default all restrictions are preliminarily bypassed to allow flexible page hierarchy.
+        // To enforce strict restrictions, include --type-restrictions in the migrate command.
+        // ---------------------------------------------------------------------------------
         await BypassAllowedChildClasses();
 
         return new GenericCommandResult();
@@ -208,8 +263,14 @@ public class MigratePageTypesCommandHandler(
         }
     }
 
+    /// <summary>
+    /// Transforms the source ICmsClass into target DataClassInfo (via CmsClassMapper),
+    /// handles reusable field schema conversion if configured, persists the class into
+    /// the target XbyK database, and registers the ClassID translation mapping.
+    /// </summary>
     private DataClassInfo? SaveUsingKxoApi(ICmsClass ksClass, DataClassInfo kxoDataClass)
     {
+        // 1. Invoke CmsClassMapper to convert form definitions, field controls, and class type
         var mapped = dataClassMapper.Map(ksClass, kxoDataClass);
         protocol.MappedTarget(mapped);
 
@@ -220,17 +281,20 @@ public class MigratePageTypesCommandHandler(
                 (var dataClassInfo, bool newInstance) = mapped;
                 ArgumentNullException.ThrowIfNull(dataClassInfo, nameof(dataClassInfo));
 
+                // 2. Convert to reusable schema if configured in appsettings
                 if (reusableSchemaService.IsConversionToReusableFieldSchemaRequested(dataClassInfo.ClassName))
                 {
                     dataClassInfo = reusableSchemaService.ConvertToReusableSchema(dataClassInfo, dataClassInfo.ClassName,
                         dataClassInfo.ClassDisplayName);
                 }
 
+                // 3. Persist Content Type into target database (creates/updates SQL table and metadata)
                 kxpClassFacade.SetClass(dataClassInfo);
 
                 protocol.Success(ksClass, dataClassInfo, mapped);
                 logger.LogEntitySetAction(newInstance, dataClassInfo);
 
+                // 4. Record ClassID mapping (Source ClassID -> Target ClassID) for child entity dependencies
                 primaryKeyMappingContext.SetMapping<DataClassInfo>(
                     r => r.ClassID,
                     ksClass.ClassID,
