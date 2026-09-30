@@ -71,6 +71,11 @@ public class MultiClassMapping(string targetClassName, Action<DataClassInfo>? cl
 
                 formField.Settings ??= new System.Collections.Hashtable();
 
+                if (TargetFieldPatchers.TryGetValue(newField.FieldName, out var patcher))
+                {
+                    patcher.Invoke(formField);
+                }
+
                 formInfo.AddFormItem(formField);
             }
             target.ClassFormDefinition = formInfo.GetXmlDefinition();

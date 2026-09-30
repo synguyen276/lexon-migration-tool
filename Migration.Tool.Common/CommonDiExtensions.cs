@@ -1,4 +1,5 @@
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 using Migration.Tool.Common.Abstractions;
 using Migration.Tool.Common.MigrationProtocol;
 
@@ -14,7 +15,9 @@ public static class CommonDiExtensions
         services.AddSingleton<UrlProtocol>();
 
         services.AddTransient<DefaultCustomTableClassMappingHandler>();
+        services.TryAddSingleton<IWrapperPageRuleProvider>(new WrapperPageRuleProvider([]));
 
         return services;
     }
 }
+

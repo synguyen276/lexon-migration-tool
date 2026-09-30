@@ -367,13 +367,14 @@ public class AssetMigration(
                                 }
                                 default:
                                 {
-                                    hasMigratedAsset = false;
+                                    logger.LogWarning("Attachment in group for field '{Field}' on document {DocumentId} could not be migrated and will be skipped", field.Name, docId);
                                     break;
                                 }
                             }
                         }
 
                         mfis = mfisl;
+                        hasMigratedAsset = mfis.Count > 0;
                     }
                     else
                     {
@@ -402,8 +403,8 @@ public class AssetMigration(
         }
         else
         {
-            logger.LogTrace("No assets migrated for '{FieldName}', value: '{Value}'", fieldName, sourceValue);
-            return new FieldMigrationResult(false, null);
+            logger.LogWarning("No assets could be migrated for field '{FieldName}' (value: '{Value}'). Field will be skipped/set to empty.", fieldName, sourceValue);
+            return new FieldMigrationResult(true, null);
         }
     }
 

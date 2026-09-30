@@ -1,7 +1,9 @@
 using Microsoft.Extensions.DependencyInjection;
 using Migration.Tool.Extensions.CommunityMigrations;
 using Migration.Tool.Extensions.DefaultMigrations;
+using Migration.Tool.Extensions.LexonMigrations;
 using Migration.Tool.KXP.Api.Services.CmsClass;
+using Migration.Tool.Source.Mappers.ContentItemMapperDirectives;
 
 namespace Migration.Tool.Extensions;
 
@@ -16,6 +18,18 @@ public static class ServiceCollectionExtensions
         services.AddTransient<IWidgetPropertyMigration, WidgetPathSelectorMigration>();
         services.AddTransient<IWidgetPropertyMigration, WidgetPageSelectorMigration>();
 
+        // ── Lexon migration registrations ──────────────────────────────────────
+        // ORDER MATTERS: child link rules → class mapping rules (incl. wrappers).
+        //   1. Child link rules  – LexonChildLinkDirector resolves parent/child
+        //      relationships and linked-node references before content items are
+        //      mapped, so it must be registered first.
+        //   2. Class mapping rules – rename/remodel source classes into target
+        //      reusable content types AND register wrapper page rules for those
+        //      that need a website-page wrapper. Wrapper rules are co-located
+        //      with their class mapping definitions.
+        // ───────────────────────────────────────────────────────────────────────
+        services.AddTransient<ContentItemDirectorBase, LexonChildLinkDirector>();
+        services.AddClassMappingRules();
 
         // services.AddClassMergeExample();
         // services.AddClassMergeExampleAsReusable();

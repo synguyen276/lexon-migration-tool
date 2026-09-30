@@ -45,6 +45,11 @@ public class CommandParser : ICommandParser
                 continue;
             }
 
+            if (arg == "--nowait")
+            {
+                continue;
+            }
+
             if (arg == $"--{MigrateContactManagementCommand.Moniker}")
             {
                 subcommands.Add(new MigrateContactManagementCommand());

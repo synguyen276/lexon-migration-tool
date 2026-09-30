@@ -50,7 +50,8 @@ public class MigratePagesCommandHandler(
     SourceInstanceContext sourceInstanceContext,
     ClassMappingProvider classMappingProvider,
     IEnumerable<IReusableSchemaBuilder> reusableSchemaBuilders,
-    IEnumerable<ContentItemDirectorBase> directors
+    IEnumerable<ContentItemDirectorBase> directors,
+    IWrapperPageRuleProvider? wrapperRuleProvider = null
     )
     : IRequestHandler<MigratePagesCommand, CommandResult>
 {
@@ -407,7 +408,10 @@ public class MigratePagesCommandHandler(
                                     }
                                     case { Success: true, Imported: ContentItemDataInfo cidi }:
                                     {
-                                        mappedSiteNodes[ksNode.NodeGUID].ContentItemDataGuids.Add(cidi.ContentItemDataGUID);
+                                        if (contentItemDirective?.TargetClassInfo == null || cidi.ClassName.Equals(contentItemDirective.TargetClassInfo.ClassName, StringComparison.OrdinalIgnoreCase))
+                                        {
+                                            mappedSiteNodes[ksNode.NodeGUID].ContentItemDataGuids.Add(cidi.ContentItemDataGUID);
+                                        }
                                         break;
                                     }
 
@@ -421,7 +425,10 @@ public class MigratePagesCommandHandler(
                         {
                             AssertVersionStatusRule(commonDataInfos);
 
-                            if (contentItemDirective != null && webPageItemInfo != null && contentItemDirective.TargetClassInfo is { ClassWebPageHasUrl: true })
+                            bool hasUrl = (contentItemDirective != null && contentItemDirective.TargetClassInfo is { ClassWebPageHasUrl: true }) ||
+                                          (webPageItemInfo != null && wrapperRuleProvider?.TryGetRule(ksNodeClass.ClassName, out _) == true);
+
+                            if (contentItemDirective != null && webPageItemInfo != null && hasUrl)
                             {
                                 await GenerateDefaultPageUrlPath(ksNode, webPageItemInfo);
                                 if (!contentItemDirective!.RegenerateUrlPath)
@@ -489,8 +496,31 @@ public class MigratePagesCommandHandler(
         var hostContentItem = ContentItemFromNode(ksAncestorNode) ?? throw new InvalidOperationException($"Content item or page migrated from source ancestor node NodeGUID={ksAncestorNode.NodeGUID} not found");
         var hostClass = DataClassInfoProvider.GetDataClassInfo(hostContentItem.ContentItemContentTypeID) ?? throw new InvalidOperationException($"Ancestor node NodeGUID={ksAncestorNode.NodeGUID} is a folder and cannot be used to store the reference");
 
-        var linkedContentItem = ContentItemFromNode(linkedNode);
-        var linkedNodeClass = DataClassInfoProvider.GetDataClassInfo(linkedContentItem.ContentItemContentTypeID);
+        var linkedContentItem = ContentItemFromNode(linkedNode) ?? throw new InvalidOperationException($"Linked content item not found for NodeGUID={linkedNode.NodeGUID}");
+        var linkedNodeClass = DataClassInfoProvider.GetDataClassInfo(linkedContentItem.ContentItemContentTypeID) ?? throw new InvalidOperationException($"Data class not found for ContentItemContentTypeID={linkedContentItem.ContentItemContentTypeID}");
+
+        // If host or linked item was created via a wrapper page rule, resolve to the underlying reusable content item
+        var ancestorSourceClass = GetCmsClass(ksAncestorNode.NodeClassID);
+        if (wrapperRuleProvider?.TryGetRule(ancestorSourceClass.ClassName, out var hostWrapperRule) == true && hostWrapperRule != null)
+        {
+            var hostReusableGuid = GuidHelper.CreateContentItemGuid($"reusable|{hostContentItem.ContentItemGUID}");
+            if (ContentItemInfo.Provider.Get(hostReusableGuid) is { } reusableHostItem)
+            {
+                hostContentItem = reusableHostItem;
+                hostClass = DataClassInfoProvider.GetDataClassInfo(hostContentItem.ContentItemContentTypeID) ?? hostClass;
+            }
+        }
+
+        var linkedSourceClass = GetCmsClass(linkedNode.NodeClassID);
+        if (wrapperRuleProvider?.TryGetRule(linkedSourceClass.ClassName, out var linkedWrapperRule) == true && linkedWrapperRule != null)
+        {
+            var linkedReusableGuid = GuidHelper.CreateContentItemGuid($"reusable|{linkedContentItem.ContentItemGUID}");
+            if (ContentItemInfo.Provider.Get(linkedReusableGuid) is { } reusableLinkedItem)
+            {
+                linkedContentItem = reusableLinkedItem;
+                linkedNodeClass = DataClassInfoProvider.GetDataClassInfo(linkedContentItem.ContentItemContentTypeID) ?? linkedNodeClass;
+            }
+        }
 
         EnsureClassReferenceFields(hostClass.ClassName, new Dictionary<string, (Guid? fieldGuid, HashSet<Guid> allowedTypes)>
         {
@@ -587,18 +617,13 @@ public class MigratePagesCommandHandler(
 
     private async Task LinkChildren(Dictionary<Guid, NodeMapResult> mappedSiteNodes)
     {
-        var reusableItems = mappedSiteNodes.Values.Where(x => x.TargetClassInfo.IsReusableContentType());
-        var nonReusableItemsWithChildLinks = mappedSiteNodes.Values.Where(x => !x.TargetClassInfo.IsReusableContentType() && x.ChildLinks.Count != 0);
-        foreach (var item in nonReusableItemsWithChildLinks)
-        {
-            logger.LogError("Content item {ContentItemGuid} (original node {OriginalNodeGuid}) is not reusable, but specifies linked children. Add the content type to appsettings ConvertClassesToContentHub collection", item.ContentItemGuid, item.Node.NodeGUID);
-        }
+        var itemsWithChildLinks = mappedSiteNodes.Values.Where(x => x.ChildLinks.Count != 0).ToList();
 
         // [content type name] -> { [field name] -> allowed referenced types }
         Dictionary<string, Dictionary<string, (Guid? fieldGuid, HashSet<Guid> allowedTypes)>> referenceFields = [];
 
         // Gather necessary reference fields and/or allowed referenced types
-        foreach (var parentItem in reusableItems)
+        foreach (var parentItem in itemsWithChildLinks)
         {
             if (!referenceFields.ContainsKey(parentItem.TargetClassInfo.ClassName))
             {
@@ -613,14 +638,17 @@ public class MigratePagesCommandHandler(
                 }
                 foreach (var (fieldName, node) in collection)
                 {
-                    var childTargetType = mappedSiteNodes[node.NodeGUID].TargetClassInfo.ClassGUID;
-                    referenceFields[parentItem.TargetClassInfo.ClassName][collection.Key].allowedTypes.Add(childTargetType);
+                    if (mappedSiteNodes.TryGetValue(node.NodeGUID, out var childNodeMap) && childNodeMap.TargetClassInfo is not null)
+                    {
+                        var childTargetType = childNodeMap.TargetClassInfo.ClassGUID;
+                        referenceFields[parentItem.TargetClassInfo.ClassName][collection.Key].allowedTypes.Add(childTargetType);
+                    }
                 }
             }
         }
 
         // Merge required allowed referenced types with already existing ones
-        foreach (var classInfo in reusableItems.Select(x => x.TargetClassInfo).GroupBy(x => x.ClassName).Select(x => x.First()))
+        foreach (var classInfo in itemsWithChildLinks.Select(x => x.TargetClassInfo).GroupBy(x => x.ClassName).Select(x => x.First()))
         {
             if (referenceFields.ContainsKey(classInfo.ClassName))
             {
@@ -641,13 +669,30 @@ public class MigratePagesCommandHandler(
 
         foreach (var classRefFields in referenceFields)
         {
-            EnsureClassReferenceFields(classRefFields.Key, classRefFields.Value);
+            // Remove fields with no resolved allowed types — these are fields whose children
+            // are all linked nodes (handled by StoreLinkedNodeRef via DirectLinkedNode)
+            // and should not be modified here to avoid overwriting already-configured schemas.
+            var fieldsWithTypes = classRefFields.Value
+                .Where(f => f.Value.allowedTypes.Count > 0)
+                .ToDictionary(f => f.Key, f => f.Value);
+
+            if (fieldsWithTypes.Count > 0)
+            {
+                EnsureClassReferenceFields(classRefFields.Key, fieldsWithTypes);
+            }
         }
 
-        foreach (var parentItem in reusableItems)
+        foreach (var parentItem in itemsWithChildLinks)
         {
             var parentMappedNode = mappedSiteNodes[parentItem.Node.NodeGUID];
-            foreach (var contentItemDataGuid in parentItem.ContentItemDataGuids)
+            var contentItemDataGuids = parentItem.ContentItemDataGuids.Count != 0
+                ? parentItem.ContentItemDataGuids
+                : ContentItemCommonDataInfo.Provider.Get()
+                    .WhereEquals(nameof(ContentItemCommonDataInfo.ContentItemCommonDataContentItemID), ContentItemInfo.Provider.Get(parentItem.ContentItemGuid)?.ContentItemID ?? 0)
+                    .Select(x => x.ContentItemCommonDataGUID)
+                    .ToList();
+
+            foreach (var contentItemDataGuid in contentItemDataGuids)
             {
                 var dataModel = new ContentItemDataModel
                 {
@@ -659,9 +704,26 @@ public class MigratePagesCommandHandler(
 
                 foreach (var childCollection in parentItem.ChildLinks.GroupBy(x => x.fieldName))
                 {
-                    var guidArray = childCollection.Select(x => new { Identifier = mappedSiteNodes[x.node.NodeGUID].ContentItemGuid }).ToArray();
+                    var guidArray = childCollection
+                        .Where(x => mappedSiteNodes.TryGetValue(x.node.NodeGUID, out var childMap) && childMap.ContentItemGuid != Guid.Empty)
+                        .Select(x => new { Identifier = mappedSiteNodes[x.node.NodeGUID].ContentItemGuid })
+                        .ToArray();
+
+                    // Skip fields where no matching children were resolved.
+                    // This avoids overwriting data set by StoreLinkedNodeRef for
+                    // linked-node-based relationships (e.g., via DirectLinkedNode).
+                    if (guidArray.Length == 0)
+                    {
+                        continue;
+                    }
+
                     string serializedValue = JsonConvert.SerializeObject(guidArray);
                     dataModel.CustomProperties[childCollection.Key] = serializedValue;
+                }
+
+                if (dataModel.CustomProperties.Count == 0)
+                {
+                    continue;
                 }
 
                 var importResult = await importer.ImportAsync(dataModel);
@@ -707,6 +769,26 @@ public class MigratePagesCommandHandler(
             if (ffi.DataType != FieldDataType.ContentItemReference)
             {
                 throw new InvalidOperationException($"Field {field.Key} is required to be of type {FieldDataType.ContentItemReference}, but is of type {ffi.DataType}");
+            }
+
+            ffi.Visible = true;
+            ffi.Enabled = true;
+            ffi.Settings[FormDefinitionPatcher.SettingsElemControlname] = FormComponents.AdminContentItemSelectorComponent;
+
+            if (ffi.Settings[FormDefinitionPatcher.AllowedContentItemTypeIdentifiers] is string existingAllowedStr && !string.IsNullOrWhiteSpace(existingAllowedStr))
+            {
+                try
+                {
+                    var existingGuids = JsonConvert.DeserializeObject<Guid[]>(existingAllowedStr);
+                    if (existingGuids != null)
+                    {
+                        foreach (var g in existingGuids)
+                        {
+                            field.Value.allowedTypes.Add(g);
+                        }
+                    }
+                }
+                catch { }
             }
 
             fields[field.Key] = (ffi.Guid, field.Value.allowedTypes);
@@ -884,7 +966,9 @@ public class MigratePagesCommandHandler(
                                 VersionStatus.Published => false,
                                 VersionStatus.Unpublished => false,
                                 _ => throw new ArgumentOutOfRangeException()
-                            }
+                            },
+                            WebPageUrlPathIsCanonical = true,
+                            WebPageUrlPathType = (int)WebPageUrlPathType.System
                         };
 
                         CheckPathAlreadyExists(webPageUrlPath, languageInfo, webSiteChannel, webPageItemInfo.WebPageItemID);
@@ -936,7 +1020,9 @@ public class MigratePagesCommandHandler(
                             VersionStatus.Published => false,
                             VersionStatus.Unpublished => false,
                             _ => throw new ArgumentOutOfRangeException()
-                        }
+                        },
+                        WebPageUrlPathIsCanonical = true,
+                        WebPageUrlPathType = (int)WebPageUrlPathType.System
                     };
 
                     CheckPathAlreadyExists(webPageUrlPath, languageInfo, webSiteChannel, webPageItemInfo.WebPageItemID);

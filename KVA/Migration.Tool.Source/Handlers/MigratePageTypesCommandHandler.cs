@@ -1,5 +1,8 @@
 using CMS.ContentEngine;
+using CMS.ContentEngine.Internal;
+using CMS.Core;
 using CMS.DataEngine;
+using CMS.FormEngine;
 using Kentico.Xperience.UMT.Model;
 using Kentico.Xperience.UMT.Services;
 using MediatR;
@@ -10,14 +13,20 @@ using Microsoft.Extensions.Logging;
 using Migration.Tool.Common;
 using Migration.Tool.Common.Abstractions;
 using Migration.Tool.Common.Builders;
+using Migration.Tool.Common.Enumerations;
 using Migration.Tool.Common.Helpers;
 using Migration.Tool.Common.MigrationProtocol;
 using Migration.Tool.KXP.Api;
+using Migration.Tool.KXP.Api.Auxiliary;
+using Migration.Tool.KXP.Api.Services.CmsClass;
 using Migration.Tool.Source.Contexts;
 using Migration.Tool.Source.Helpers;
+using Migration.Tool.Source.Mappers;
+using Migration.Tool.Source.Mappers.ContentItemMapperDirectives;
 using Migration.Tool.Source.Model;
 using Migration.Tool.Source.Providers;
 using Migration.Tool.Source.Services;
+using Newtonsoft.Json;
 
 namespace Migration.Tool.Source.Handlers;
 
@@ -53,7 +62,10 @@ public class MigratePageTypesCommandHandler(
     ReusableSchemaService reusableSchemaService,
     ClassMappingProvider classMappingProvider,
     IImporter importer,
-    IEnumerable<IReusableSchemaBuilder> reusableSchemaBuilders
+    IEnumerable<IReusableSchemaBuilder> reusableSchemaBuilders,
+    IWrapperPageRuleProvider? wrapperRuleProvider = null,
+    IChildLinkRuleProvider? childLinkRuleProvider = null,
+    IEnumerable<ContentItemDirectorBase>? directors = null
     )
     : IRequestHandler<MigratePageTypesCommand, CommandResult>
 {
@@ -76,7 +88,10 @@ public class MigratePageTypesCommandHandler(
         // Check for custom manual class mappings or reusable schema builders
         var manualMappings = classMappingProvider.ExecuteMappings();
         var manuallyMappedSourceClassIDs = new HashSet<int>();
-        var manuallyMappedSourceClassNames = manualMappings.Values.SelectMany(x => x.mappping.SourceClassNames).ToHashSet();
+        var manuallyMappedSourceClassNames = manualMappings.Values.SelectMany(x => x.mappping.SourceClassNames).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var droppedClassNames = (directors ?? Enumerable.Empty<ContentItemDirectorBase>())
+            .SelectMany(d => d.DroppedSourceClassNames)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
 
         if (reusableSchemaBuilders.Any() && !string.IsNullOrWhiteSpace(toolConfiguration.CreateReusableFieldSchemaForClasses))
         {
@@ -101,6 +116,13 @@ public class MigratePageTypesCommandHandler(
             // Skip classes handled by custom manual class mappings
             if (manualMappings.ContainsKey(ksClass.ClassName))
             {
+                continue;
+            }
+
+            // Skip intermediate container classes dropped by content item directors
+            if (droppedClassNames.Contains(ksClass.ClassName))
+            {
+                logger.LogInformation("Page type: class {ClassName} was skipped => it is an intermediate container dropped by content item director", ksClass.ClassName);
                 continue;
             }
 
@@ -210,7 +232,47 @@ public class MigratePageTypesCommandHandler(
                         }
                     }
                 }
+
+                if (wrapperRuleProvider?.TryGetRule(ksClass.ClassName, out var wrapperRule) == true && wrapperRule != null)
+                {
+                    EnsureWrapperPageType(wrapperRule, targetClass, ksClass);
+                }
             }
+        }
+
+        // ---------------------------------------------------------------------------------
+        // STAGE 5b: Ensure Wrapper Page Types for manually-mapped classes
+        // Custom IClassMapping classes are skipped in the main loop (STAGE 2), so wrapper
+        // page rules targeting those source classes never fire. Process them here using the
+        // target DataClassInfo created by ExecuteMappings().
+        // ---------------------------------------------------------------------------------
+        if (wrapperRuleProvider is not null)
+        {
+            foreach (var wrapperRule in wrapperRuleProvider.GetRules())
+            {
+                if (manualMappings.TryGetValue(wrapperRule.SourceClassName, out var mappingEntry))
+                {
+                    var ksClass = modelFacade.SelectWhere<ICmsClass>("ClassName=@className", new SqlParameter("className", wrapperRule.SourceClassName)).FirstOrDefault();
+                    if (ksClass is not null)
+                    {
+                        EnsureWrapperPageType(wrapperRule, mappingEntry.target, ksClass);
+                    }
+                    else
+                    {
+                        logger.LogWarning("Wrapper page rule for source class '{SourceClassName}' skipped: source class not found in K13 database", wrapperRule.SourceClassName);
+                    }
+                }
+            }
+        }
+
+        // ---------------------------------------------------------------------------------
+        // STAGE 5c: Ensure Child Link Reference Fields on target classes
+        // ContentItemReference fields specified in child link rules are configured on the
+        // target classes with AllowedContentItemTypeIdentifiers matching resolved child classes.
+        // ---------------------------------------------------------------------------------
+        if (childLinkRuleProvider is not null)
+        {
+            EnsureChildLinkFields(childLinkRuleProvider.GetRules(), manualMappings);
         }
 
         // ---------------------------------------------------------------------------------
@@ -311,4 +373,198 @@ public class MigratePageTypesCommandHandler(
 
         return null;
     }
+
+    private void EnsureWrapperPageType(WrapperPageRule rule, DataClassInfo reusableClass, ICmsClass ksClass)
+    {
+        var wrapperClass = kxpClassFacade.GetClass(rule.WrapperClassName) ?? DataClassInfo.New();
+        wrapperClass.ClassName = rule.WrapperClassName;
+        wrapperClass.ClassDisplayName = rule.WrapperDisplayName;
+        if (string.IsNullOrWhiteSpace(wrapperClass.ClassTableName))
+        {
+            wrapperClass.ClassTableName = rule.WrapperClassName.Replace('.', '_');
+        }
+        wrapperClass.ClassType = ClassType.CONTENT_TYPE;
+        wrapperClass.ClassContentTypeType = ClassContentTypeType.WEBSITE;
+        wrapperClass.ClassWebPageHasUrl = true;
+
+        if (wrapperClass.ClassGUID == Guid.Empty)
+        {
+            wrapperClass.ClassGUID = GuidHelper.CreateDataClassGuid(rule.WrapperClassName.ToLowerInvariant());
+        }
+
+        var contentTypeManager = Service.Resolve<IContentTypeManager>();
+        var fi = new FormInfo(wrapperClass.ClassFormDefinition);
+        if (!fi.ItemsList.OfType<FormFieldInfo>().Any(x => x.Name == nameof(ContentItemDataInfo.ContentItemDataGUID)))
+        {
+            contentTypeManager.Initialize(wrapperClass);
+            fi = new FormInfo(wrapperClass.ClassFormDefinition);
+        }
+
+        var refField = fi.GetFormField(rule.ContentItemReferenceField);
+        if (refField is null)
+        {
+            refField = new FormFieldInfo
+            {
+                Guid = GuidHelper.CreateFieldGuid($"{rule.ContentItemReferenceField.ToLowerInvariant()}|{rule.WrapperClassName}"),
+                AllowEmpty = true,
+                Caption = "Content item",
+                DataType = FieldDataType.ContentItemReference,
+                Name = rule.ContentItemReferenceField,
+                Enabled = true,
+                Visible = true,
+                System = false,
+                DefaultValue = null,
+                Settings =
+                {
+                    { FormDefinitionPatcher.SettingsElemControlname, FormComponents.AdminContentItemSelectorComponent }
+                }
+            };
+            fi.AddFormItem(refField);
+        }
+
+        refField.Settings[FormDefinitionPatcher.AllowedContentItemTypeIdentifiers] = JsonConvert.SerializeObject(new[] { reusableClass.ClassGUID });
+        refField.Settings[FormDefinitionPatcher.SettingsMaximumpages] = "1";
+
+        if (rule.IncludeLegacyMetadata)
+        {
+            var version = modelFacade.SelectVersion();
+            var includedMetadata = toolConfiguration.IncludeExtendedMetadata.GetValueOrDefault(false) ? CmsClassMapper.IncludedMetadata.Extended : CmsClassMapper.IncludedMetadata.Basic;
+            foreach (var field in CmsClassMapper.GetLegacyMetadataFields(version, includedMetadata))
+            {
+                CmsClassMapper.AppendLegacyMetadataField(fi, wrapperClass.ClassName, field, out _);
+            }
+        }
+
+        wrapperClass.ClassFormDefinition = fi.GetXmlDefinition();
+        kxpClassFacade.SetClass(wrapperClass);
+        logger.LogInformation("Ensured wrapper page type {WrapperClassName} for source class {SourceClassName} referencing reusable class {ReusableClassName} ({ReusableGuid})",
+            rule.WrapperClassName, ksClass.ClassName, reusableClass.ClassName, reusableClass.ClassGUID);
+
+        foreach (var cmsClassSite in modelFacade.SelectWhere<ICmsClassSite>("ClassID = @classId", new SqlParameter("classId", ksClass.ClassID)))
+        {
+            if (modelFacade.SelectById<ICmsSite>(cmsClassSite.SiteID) is { SiteGUID: var siteGuid })
+            {
+                if (ChannelInfo.Provider.Get(siteGuid) is { ChannelID: var channelId })
+                {
+                    var existingLink = ContentTypeChannelInfo.Provider.Get()
+                        .WhereEquals(nameof(ContentTypeChannelInfo.ContentTypeChannelChannelID), channelId)
+                        .WhereEquals(nameof(ContentTypeChannelInfo.ContentTypeChannelContentTypeID), wrapperClass.ClassID)
+                        .FirstOrDefault();
+
+                    if (existingLink == null)
+                    {
+                        var info = new ContentTypeChannelInfo
+                        {
+                            ContentTypeChannelChannelID = channelId,
+                            ContentTypeChannelContentTypeID = wrapperClass.ClassID
+                        };
+                        ContentTypeChannelInfo.Provider.Set(info);
+                    }
+                }
+                else
+                {
+                    logger.LogWarning("Channel for site with SiteGUID '{SiteGuid}' not found", siteGuid);
+                }
+            }
+            else
+            {
+                logger.LogWarning("Source site with SiteID '{SiteId}' not found", cmsClassSite.SiteID);
+            }
+        }
+    }
+
+    private void EnsureChildLinkFields(
+        IReadOnlyList<ChildLinkRule> childLinkRules,
+        Dictionary<string, (DataClassInfo target, IClassMapping mappping)> manualMappings)
+    {
+        foreach (var rule in childLinkRules)
+        {
+            string parentTargetClassName = manualMappings.TryGetValue(rule.ParentClassName, out var parentEntry)
+                ? parentEntry.target.ClassName
+                : rule.ParentClassName;
+
+            var parentClass = DataClassInfoProvider.GetDataClassInfo(parentTargetClassName);
+            if (parentClass is null)
+            {
+                logger.LogWarning("Child link rule for parent class '{ParentClassName}' skipped: target class '{TargetClassName}' not found",
+                    rule.ParentClassName, parentTargetClassName);
+                continue;
+            }
+
+            string childTargetClassName = manualMappings.TryGetValue(rule.ChildClassName, out var childEntry)
+                ? childEntry.target.ClassName
+                : rule.ChildClassName;
+
+            var childClass = DataClassInfoProvider.GetDataClassInfo(childTargetClassName);
+
+            var fi = new FormInfo(parentClass.ClassFormDefinition);
+            var refField = fi.GetFormField(rule.TargetFieldName);
+            if (refField is null)
+            {
+                refField = new FormFieldInfo
+                {
+                    Guid = GuidHelper.CreateFieldGuid($"{rule.TargetFieldName.ToLowerInvariant()}|{parentClass.ClassName}"),
+                    AllowEmpty = true,
+                    Caption = rule.FieldCaption ?? rule.TargetFieldName,
+                    DataType = FieldDataType.ContentItemReference,
+                    Name = rule.TargetFieldName,
+                    Enabled = true,
+                    Visible = true,
+                    System = false,
+                    DefaultValue = null,
+                    Settings =
+                    {
+                        { FormDefinitionPatcher.SettingsElemControlname, FormComponents.AdminContentItemSelectorComponent }
+                    }
+                };
+                fi.AddFormItem(refField);
+            }
+            else
+            {
+                refField.DataType = FieldDataType.ContentItemReference;
+                refField.Visible = true;
+                refField.Enabled = true;
+                refField.Settings[FormDefinitionPatcher.SettingsElemControlname] = FormComponents.AdminContentItemSelectorComponent;
+                if (!string.IsNullOrWhiteSpace(rule.FieldCaption))
+                {
+                    refField.Caption = rule.FieldCaption;
+                }
+            }
+
+            if (childClass is not null)
+            {
+                var allowedGuids = new HashSet<Guid>();
+                if (refField.Settings[FormDefinitionPatcher.AllowedContentItemTypeIdentifiers] is string existingAllowed &&
+                    !string.IsNullOrWhiteSpace(existingAllowed))
+                {
+                    try
+                    {
+                        var deserialized = JsonConvert.DeserializeObject<Guid[]>(existingAllowed);
+                        if (deserialized != null)
+                        {
+                            foreach (var g in deserialized)
+                            {
+                                allowedGuids.Add(g);
+                            }
+                        }
+                    }
+                    catch { }
+                }
+
+                allowedGuids.Add(childClass.ClassGUID);
+                refField.Settings[FormDefinitionPatcher.AllowedContentItemTypeIdentifiers] = JsonConvert.SerializeObject(allowedGuids.ToArray());
+            }
+            else
+            {
+                logger.LogWarning("Child class '{ChildClassName}' (target: '{ChildTargetClassName}') not found when configuring child link field '{FieldName}' on '{ParentClassName}'",
+                    rule.ChildClassName, childTargetClassName, rule.TargetFieldName, parentClass.ClassName);
+            }
+
+            parentClass.ClassFormDefinition = fi.GetXmlDefinition();
+            kxpClassFacade.SetClass(parentClass);
+            logger.LogInformation("Ensured child link reference field '{FieldName}' on class '{ParentClassName}' (allowed child: {ChildClassName})",
+                rule.TargetFieldName, parentClass.ClassName, childClass?.ClassName ?? childTargetClassName);
+        }
+    }
 }
+

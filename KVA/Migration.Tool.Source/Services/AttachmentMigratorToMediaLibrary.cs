@@ -225,10 +225,10 @@ public class AttachmentMigratorToMediaLibrary(
             return DummyUploadedFile.FromStream(ms, attachment.AttachmentMimeType, attachment.AttachmentSize, attachment.AttachmentName);
         }
 
-        logger.LogError("Attachment binary data is null {Attachment} " +
+        logger.LogWarning("Attachment binary data is null {Attachment}. Skipping attachment migration. " +
             "Option 1: Via admin web interface of your source instance navigate to the attachment and update the data. " +
             "Option 2: Update the database directly - table CMS_Attachment, column AttachmentBinary. " +
-            "Option 3: Via admin web interface of your source instance remove all attachment references, then remove the attachment",
+            "Option 3: Via admin web interface of your source instance remove all attachment references, then remove the attachment.",
             new { attachment.AttachmentName, attachment.AttachmentSiteID, attachment.AttachmentID });
 
         return null;

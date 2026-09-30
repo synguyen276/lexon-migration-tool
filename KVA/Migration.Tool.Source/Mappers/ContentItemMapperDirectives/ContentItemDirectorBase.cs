@@ -5,6 +5,12 @@ public abstract class ContentItemDirectorBase
 {
     internal Func<Guid, JToken> MediaInfoLoader = null!;
 
+    /// <summary>
+    /// Source class names that this director explicitly drops or manages as intermediate containers,
+    /// and which should not be migrated as standard page types / content types.
+    /// </summary>
+    public virtual IEnumerable<string> DroppedSourceClassNames => Enumerable.Empty<string>();
+
     public abstract void Direct(ContentItemSource source, IContentItemActionProvider options);
 
     // Modifier 'virtual' chosen over 'abstract' to maintain backwards compatibility with custom user code that already implements a director

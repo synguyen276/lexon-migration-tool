@@ -81,10 +81,10 @@ public class ClassMappingProvider(
         EnsureSettings();
         ExecReusableSchemaBuilders();
 
-        manualMappings = new Dictionary<string, (DataClassInfo target, IClassMapping mappping)>();
+        manualMappings = new Dictionary<string, (DataClassInfo target, IClassMapping mappping)>(StringComparer.OrdinalIgnoreCase);
         var metadataFields = GetLegacyMetadataFields(modelFacade.SelectVersion(), IncludedMetadata.Extended).ToArray();
 
-        foreach (var classMapping in MappingsByClassName.Values)
+        foreach (var classMapping in MappingsByClassName.Values.Distinct())
         {
             var newDt = DataClassInfoProvider.GetDataClassInfo(classMapping.TargetClassName) ?? DataClassInfo.New();
             classMapping.PatchTargetDataClass(newDt);
@@ -177,16 +177,20 @@ public class ClassMappingProvider(
                 nfi = new FormInfo(newDt.ClassFormDefinition);
                 foreach (string fieldName in classMapping.TargetFieldPatchers.Keys)
                 {
-                    classMapping.TargetFieldPatchers[fieldName].Invoke(nfi.GetFormField(fieldName));
+                    var field = nfi.GetFormField(fieldName);
+                    if (field != null)
+                    {
+                        classMapping.TargetFieldPatchers[fieldName].Invoke(field);
+                    }
                 }
 
                 newDt.ClassFormDefinition = nfi.GetXmlDefinition();
             }
 
             DataClassInfoProvider.SetDataClassInfo(newDt);
-            foreach (var gByClass in classMapping.Mappings.GroupBy(x => x.SourceClassName))
+            foreach (string sourceClassName in classMapping.SourceClassNames)
             {
-                manualMappings.TryAdd(gByClass.Key, (newDt, classMapping));
+                manualMappings.TryAdd(sourceClassName, (newDt, classMapping));
             }
 
             foreach (string sourceClassName in classMapping.SourceClassNames)

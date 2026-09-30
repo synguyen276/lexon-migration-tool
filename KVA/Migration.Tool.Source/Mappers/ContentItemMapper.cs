@@ -83,7 +83,8 @@ public class ContentItemMapper(
     IServiceProvider serviceProvider,
     IEnumerable<ContentItemDirectorBase> directors,
     ContentFolderService contentFolderService,
-    WorkspaceService workspaceService
+    WorkspaceService workspaceService,
+    IWrapperPageRuleProvider? wrapperRuleProvider = null
     ) : UmtMapperBase<CmsTreeMapperSource>, IUmtMapper<CustomModuleItemMapperSource>, IUmtMapper<CustomTableMapperSource>
 {
     private const string CLASS_FIELD_CONTROL_NAME = "controlname";
@@ -116,6 +117,20 @@ public class ContentItemMapper(
         {
             logger.LogError("Could not map source node NodeGUID={NodeGuid}. Target class with name {ClassName} was not identified in target instance.", cmsTree.NodeGUID, targetClassName);
             yield break;
+        }
+
+        if (wrapperRuleProvider?.TryGetRule(sourceNodeClass.ClassName, out var wrapperRule) == true && wrapperRule != null)
+        {
+            var wrapperClassInfo = DataClassInfoProvider.ProviderObject.Get(wrapperRule.WrapperClassName);
+            if (wrapperClassInfo is not null)
+            {
+                foreach (var model in MapWrapperPage(source, sourceNodeClass, targetClassInfo!, wrapperRule, wrapperClassInfo, directive, mapping))
+                {
+                    yield return model;
+                }
+                yield break;
+            }
+            logger.LogError("Target wrapper class {WrapperClassName} not found for source class {SourceClassName}", wrapperRule.WrapperClassName, sourceNodeClass.ClassName);
         }
 
         var contentItemGuid = spoiledGuidContext.EnsureNodeGuid(cmsTree.NodeGUID, cmsTree.NodeSiteID, cmsTree.NodeID);
@@ -535,6 +550,337 @@ public class ContentItemMapper(
                 WebPageItemWebsiteChannelGuid = siteGuid,
                 WebPageItemContentItemGuid = contentItemGuid,
                 WebPageItemOrder = cmsTree.NodeOrder ?? 0 // 0 is nullish value
+            };
+        }
+    }
+
+    private static VersionStatus GetDocumentVersionStatus(ICmsDocument cmsDocument) => cmsDocument switch
+    {
+        { DocumentIsArchived: true } => VersionStatus.Unpublished,
+        { DocumentPublishedVersionHistoryID: null, DocumentCheckedOutVersionHistoryID: null } => VersionStatus.Published,
+        { DocumentPublishedVersionHistoryID: { } pubId, DocumentCheckedOutVersionHistoryID: { } chId } when pubId <= chId => VersionStatus.Published,
+        { DocumentPublishedVersionHistoryID: null, DocumentCheckedOutVersionHistoryID: not null } => VersionStatus.InitialDraft,
+        _ => VersionStatus.Published
+    };
+
+    private static (DateTime? scheduledPublishWhen, DateTime? scheduleUnpublishWhen) GetPublishSchedules(ICmsDocument cmsDocument, ref VersionStatus versionStatus)
+    {
+        DateTime? scheduledPublishWhen = null;
+        DateTime? scheduleUnpublishWhen = null;
+        if (cmsDocument is { DocumentPublishFrom: { } publishFrom1, DocumentPublishTo: null })
+        {
+            if (versionStatus == VersionStatus.Published) versionStatus = VersionStatus.InitialDraft;
+            scheduledPublishWhen = publishFrom1;
+        }
+        else if (cmsDocument is { DocumentPublishFrom: null, DocumentPublishTo: { } publishTo1 })
+        {
+            if (versionStatus == VersionStatus.Published) scheduleUnpublishWhen = publishTo1;
+        }
+        else if (cmsDocument is { DocumentPublishFrom: { } publishFrom2, DocumentPublishTo: { } publishTo2 })
+        {
+            if (versionStatus == VersionStatus.Published)
+            {
+                versionStatus = VersionStatus.InitialDraft;
+                scheduledPublishWhen = publishFrom2;
+                scheduleUnpublishWhen = publishTo2;
+            }
+        }
+        return (scheduledPublishWhen, scheduleUnpublishWhen);
+    }
+
+    private IEnumerable<IUmtModel> MapWrapperPage(
+        CmsTreeMapperSource source,
+        ICmsClass sourceNodeClass,
+        DataClassInfo targetClassInfo,
+        WrapperPageRule wrapperRule,
+        DataClassInfo wrapperClassInfo,
+        ContentItemDirectiveBase directive,
+        IClassMapping? mapping)
+    {
+        var (cmsTree, safeNodeName, siteGuid, nodeParentGuid, cultureToLanguageGuid, sourceFormDefinition, migratedDocuments, sourceSite, deferred) = source;
+
+        var wrapperContentItemGuid = spoiledGuidContext.EnsureNodeGuid(cmsTree.NodeGUID, cmsTree.NodeSiteID, cmsTree.NodeID);
+        var reusableContentItemGuid = GuidHelper.CreateContentItemGuid($"reusable|{wrapperContentItemGuid}");
+
+        directive.ContentItemGuid = reusableContentItemGuid;
+        directive.TargetClassInfo = targetClassInfo;
+        directive.Node = cmsTree;
+        yield return directive;
+
+        foreach (var model in YieldWrapperPageModels(source, wrapperRule, wrapperClassInfo, wrapperContentItemGuid, reusableContentItemGuid))
+        {
+            yield return model;
+        }
+
+        foreach (var model in YieldReusableContentModels(source, sourceNodeClass, targetClassInfo, mapping, reusableContentItemGuid, directive))
+        {
+            yield return model;
+        }
+    }
+
+    private IEnumerable<IUmtModel> YieldWrapperPageModels(
+        CmsTreeMapperSource source,
+        WrapperPageRule wrapperRule,
+        DataClassInfo wrapperClassInfo,
+        Guid wrapperContentItemGuid,
+        Guid reusableContentItemGuid)
+    {
+        var (cmsTree, safeNodeName, siteGuid, _, _, _, _, _, _) = source;
+
+        yield return new ContentItemModel
+        {
+            ContentItemGUID = wrapperContentItemGuid,
+            ContentItemName = $"{safeNodeName}_Page",
+            ContentItemIsReusable = false,
+            ContentItemIsSecured = cmsTree.IsSecuredNode ?? false,
+            ContentItemDataClassGuid = wrapperClassInfo.ClassGUID,
+            ContentItemChannelGuid = siteGuid
+        };
+
+        yield return EnsureWrapperWebPageItem(source, wrapperContentItemGuid);
+
+        foreach (var model in YieldWrapperDocuments(source, wrapperRule, wrapperClassInfo, wrapperContentItemGuid, reusableContentItemGuid))
+        {
+            yield return model;
+        }
+    }
+
+    private WebPageItemModel EnsureWrapperWebPageItem(CmsTreeMapperSource source, Guid wrapperContentItemGuid)
+    {
+        var (cmsTree, safeNodeName, siteGuid, nodeParentGuid, _, _, _, _, _) = source;
+        var targetWebPage = WebPageItemInfo.Provider.Get()
+            .WhereEquals(nameof(WebPageItemInfo.WebPageItemGUID), wrapperContentItemGuid)
+            .FirstOrDefault();
+        string? treePath = targetWebPage?.WebPageItemTreePath;
+
+        var websiteChannelInfo = WebsiteChannelInfo.Provider.Get(siteGuid);
+        var treePathConvertor = TreePathConvertor.GetSiteConverter(websiteChannelInfo.WebsiteChannelID);
+        if (treePath == null)
+        {
+            (bool treePathIsDifferent, treePath) = treePathConvertor.ConvertAndEnsureUniqueness(cmsTree.NodeAliasPath).GetAwaiter().GetResult();
+            if (treePathIsDifferent)
+            {
+                logger.LogInformation($"Original node alias path '{cmsTree.NodeAliasPath}' of '{cmsTree.NodeName}' item was converted to '{treePath}' since the value does not allow original range of allowed characters.");
+            }
+        }
+
+        return new WebPageItemModel
+        {
+            WebPageItemParentGuid = nodeParentGuid,
+            WebPageItemGUID = wrapperContentItemGuid,
+            WebPageItemName = safeNodeName,
+            WebPageItemTreePath = treePath,
+            WebPageItemWebsiteChannelGuid = siteGuid,
+            WebPageItemContentItemGuid = wrapperContentItemGuid,
+            WebPageItemOrder = cmsTree.NodeOrder ?? 0
+        };
+    }
+
+    private IEnumerable<IUmtModel> YieldWrapperDocuments(
+        CmsTreeMapperSource source,
+        WrapperPageRule wrapperRule,
+        DataClassInfo wrapperClassInfo,
+        Guid wrapperContentItemGuid,
+        Guid reusableContentItemGuid)
+    {
+        var (cmsTree, _, _, _, cultureToLanguageGuid, _, migratedDocuments, _, _) = source;
+
+        foreach (var cmsDocument in migratedDocuments)
+        {
+            if (!cultureToLanguageGuid.TryGetValue(cmsDocument.DocumentCulture, out var languageGuid))
+            {
+                continue;
+            }
+
+            var versionStatus = GetDocumentVersionStatus(cmsDocument);
+            var (scheduledPublishWhen, scheduleUnpublishWhen) = GetPublishSchedules(cmsDocument, ref versionStatus);
+
+            var documentGuid = spoiledGuidContext.EnsureDocumentGuid(
+                cmsDocument.DocumentGUID ?? throw new InvalidOperationException("DocumentGUID is null"),
+                cmsTree.NodeSiteID,
+                cmsTree.NodeID,
+                cmsDocument.DocumentID
+            );
+
+            var wrapperCommonDataGuid = GuidHelper.CreateContentItemCommonDataGuid($"wrapper-commondata|{documentGuid}");
+            yield return new ContentItemCommonDataModel
+            {
+                ContentItemCommonDataGUID = wrapperCommonDataGuid,
+                ContentItemCommonDataContentItemGuid = wrapperContentItemGuid,
+                ContentItemCommonDataContentLanguageGuid = languageGuid,
+                ContentItemCommonDataVersionStatus = versionStatus,
+                ContentItemCommonDataIsLatest = true
+            };
+
+            var wrapperDataModel = new ContentItemDataModel
+            {
+                ContentItemDataGUID = wrapperCommonDataGuid,
+                ContentItemDataCommonDataGuid = wrapperCommonDataGuid,
+                ContentItemContentTypeName = wrapperClassInfo.ClassName,
+                CustomProperties = []
+            };
+
+            wrapperDataModel.CustomProperties[wrapperRule.ContentItemReferenceField] =
+                JsonConvert.SerializeObject(new[] { new { Identifier = reusableContentItemGuid } });
+
+            if (wrapperRule.IncludeLegacyMetadata)
+            {
+                var wrapperFi = new FormInfo(wrapperClassInfo.ClassFormDefinition);
+                foreach (var legacyField in GetLegacyMetadataFields(modelFacade.SelectVersion()))
+                {
+                    if (GetMappedLegacyField(wrapperFi, wrapperClassInfo.ClassName, legacyField.LegacyFieldName) is { } legacyMetadataFieldName)
+                    {
+                        wrapperDataModel.CustomProperties[legacyMetadataFieldName] = legacyField.GetValue(cmsDocument);
+                    }
+                }
+            }
+            yield return wrapperDataModel;
+
+            Guid? documentCreatedByUserGuid = modelFacade.TrySelectGuid<ICmsUser>(cmsDocument.DocumentCreatedByUserID, out var cGuid) ? cGuid : null;
+            Guid? documentModifiedByUserGuid = modelFacade.TrySelectGuid<ICmsUser>(cmsDocument.DocumentModifiedByUserID, out var mGuid) ? mGuid : null;
+
+            yield return new ContentItemLanguageMetadataModel
+            {
+                ContentItemLanguageMetadataGUID = GuidHelper.CreateContentItemLanguageMetadataGuid($"wrapper-langmeta|{documentGuid}"),
+                ContentItemLanguageMetadataContentItemGuid = wrapperContentItemGuid,
+                ContentItemLanguageMetadataDisplayName = cmsDocument.DocumentName,
+                ContentItemLanguageMetadataLatestVersionStatus = versionStatus,
+                ContentItemLanguageMetadataCreatedWhen = cmsDocument.DocumentCreatedWhen,
+                ContentItemLanguageMetadataModifiedWhen = cmsDocument.DocumentModifiedWhen,
+                ContentItemLanguageMetadataCreatedByUserGuid = documentCreatedByUserGuid,
+                ContentItemLanguageMetadataModifiedByUserGuid = documentModifiedByUserGuid,
+                ContentItemLanguageMetadataHasImageAsset = false,
+                ContentItemLanguageMetadataContentLanguageGuid = languageGuid,
+                ContentItemLanguageMetadataScheduledPublishWhen = scheduledPublishWhen,
+                ContentItemLanguageMetadataScheduledUnpublishWhen = scheduleUnpublishWhen
+            };
+        }
+    }
+
+    private IEnumerable<IUmtModel> YieldReusableContentModels(
+        CmsTreeMapperSource source,
+        ICmsClass sourceNodeClass,
+        DataClassInfo targetClassInfo,
+        IClassMapping? mapping,
+        Guid reusableContentItemGuid,
+        ContentItemDirectiveBase directive)
+    {
+        var (cmsTree, safeNodeName, _, _, _, _, _, _, _) = source;
+
+        Guid? workspaceGuid = workspaceService.EnsureWorkspace(directive.WorkspaceOptions);
+        Guid? contentFolderGuid = contentFolderService.EnsureFolder(directive.ContentFolderOptions, true, workspaceGuid);
+
+        var reusableContentItemModel = new ContentItemModel
+        {
+            ContentItemGUID = reusableContentItemGuid,
+            ContentItemName = safeNodeName,
+            ContentItemIsReusable = true,
+            ContentItemIsSecured = cmsTree.IsSecuredNode ?? false,
+            ContentItemDataClassGuid = targetClassInfo.ClassGUID,
+            ContentItemChannelGuid = null,
+            ContentItemContentFolderGUID = contentFolderGuid,
+            ContentItemWorkspaceGUID = workspaceGuid
+        };
+        yield return reusableContentItemModel;
+
+        foreach (var model in YieldReusableDocuments(source, sourceNodeClass, targetClassInfo, mapping, reusableContentItemGuid, reusableContentItemModel))
+        {
+            yield return model;
+        }
+    }
+
+    private IEnumerable<IUmtModel> YieldReusableDocuments(
+        CmsTreeMapperSource source,
+        ICmsClass sourceNodeClass,
+        DataClassInfo targetClassInfo,
+        IClassMapping? mapping,
+        Guid reusableContentItemGuid,
+        ContentItemModel reusableContentItemModel)
+    {
+        var (cmsTree, _, _, _, cultureToLanguageGuid, sourceFormDefinition, migratedDocuments, sourceSite, _) = source;
+
+        foreach (var cmsDocument in migratedDocuments)
+        {
+            if (!cultureToLanguageGuid.TryGetValue(cmsDocument.DocumentCulture, out var languageGuid))
+            {
+                continue;
+            }
+
+            var versionStatus = GetDocumentVersionStatus(cmsDocument);
+            var (scheduledPublishWhen, scheduleUnpublishWhen) = GetPublishSchedules(cmsDocument, ref versionStatus);
+
+            var documentGuid = spoiledGuidContext.EnsureDocumentGuid(
+                cmsDocument.DocumentGUID ?? throw new InvalidOperationException("DocumentGUID is null"),
+                cmsTree.NodeSiteID,
+                cmsTree.NodeID,
+                cmsDocument.DocumentID
+            );
+
+            var commonDataModel = new ContentItemCommonDataModel
+            {
+                ContentItemCommonDataGUID = documentGuid,
+                ContentItemCommonDataContentItemGuid = reusableContentItemGuid,
+                ContentItemCommonDataContentLanguageGuid = languageGuid,
+                ContentItemCommonDataVersionStatus = versionStatus,
+                ContentItemCommonDataIsLatest = true
+            };
+
+            var dataModel = new ContentItemDataModel
+            {
+                ContentItemDataGUID = commonDataModel.ContentItemCommonDataGUID,
+                ContentItemDataCommonDataGuid = commonDataModel.ContentItemCommonDataGUID,
+                ContentItemContentTypeName = targetClassInfo.ClassName,
+                CustomProperties = []
+            };
+
+            var fi = new FormInfo(targetClassInfo.ClassFormDefinition);
+            var includedMetadata = configuration.IncludeExtendedMetadata.GetValueOrDefault(false) ? IncludedMetadata.Extended : IncludedMetadata.Basic;
+            FormFieldInfo[] commonFields = UnpackReusableFieldSchemas(fi.GetFields<FormSchemaInfo>()).ToArray();
+            var convertorContext = new ConvertorTreeNodeContext(cmsTree.NodeGUID, cmsTree.NodeSiteID, cmsTree.NodeSKUID, cmsDocument.DocumentID, false);
+
+            if (sourceNodeClass.ClassIsCoupledClass)
+            {
+                var sfi = new FormInfo(sourceFormDefinition);
+                string primaryKeyName = sfi.GetFields(true, true).FirstOrDefault(x => x.PrimaryKey)?.Name
+                    ?? throw new Exception("Error, unable to find coupled data primary key");
+
+                var coupledDataRow = coupledDataService.GetSourceCoupledDataRow(sourceNodeClass.ClassTableName!, primaryKeyName, cmsDocument.DocumentForeignKeyValue);
+                var sourceObjectContext = new DocumentSourceObjectContext(cmsTree, sourceNodeClass, sourceSite, sfi, fi, cmsDocument.DocumentID);
+
+                foreach (var model in MapProperties(reusableContentItemModel, commonDataModel, dataModel, sfi, fi, mapping, sourceNodeClass, targetClassInfo, coupledDataRow, sourceObjectContext, convertorContext, includedMetadata, commonFields))
+                {
+                    yield return model;
+                }
+            }
+
+            foreach (var legacyField in GetLegacyMetadataFields(modelFacade.SelectVersion()))
+            {
+                if (GetMappedLegacyField(fi, targetClassInfo.ClassName, legacyField.LegacyFieldName) is { } legacyMetadataFieldName)
+                {
+                    dataModel.CustomProperties[legacyMetadataFieldName] = legacyField.GetValue(cmsDocument);
+                }
+            }
+
+            yield return commonDataModel;
+            yield return dataModel;
+
+            Guid? documentCreatedByUserGuid = modelFacade.TrySelectGuid<ICmsUser>(cmsDocument.DocumentCreatedByUserID, out var cGuid) ? cGuid : null;
+            Guid? documentModifiedByUserGuid = modelFacade.TrySelectGuid<ICmsUser>(cmsDocument.DocumentModifiedByUserID, out var mGuid) ? mGuid : null;
+
+            yield return new ContentItemLanguageMetadataModel
+            {
+                ContentItemLanguageMetadataGUID = documentGuid,
+                ContentItemLanguageMetadataContentItemGuid = reusableContentItemGuid,
+                ContentItemLanguageMetadataDisplayName = cmsDocument.DocumentName,
+                ContentItemLanguageMetadataLatestVersionStatus = versionStatus,
+                ContentItemLanguageMetadataCreatedWhen = cmsDocument.DocumentCreatedWhen,
+                ContentItemLanguageMetadataModifiedWhen = cmsDocument.DocumentModifiedWhen,
+                ContentItemLanguageMetadataCreatedByUserGuid = documentCreatedByUserGuid,
+                ContentItemLanguageMetadataModifiedByUserGuid = documentModifiedByUserGuid,
+                ContentItemLanguageMetadataHasImageAsset = false,
+                ContentItemLanguageMetadataContentLanguageGuid = languageGuid,
+                ContentItemLanguageMetadataScheduledPublishWhen = scheduledPublishWhen,
+                ContentItemLanguageMetadataScheduledUnpublishWhen = scheduleUnpublishWhen
             };
         }
     }
@@ -1021,7 +1367,12 @@ public class ContentItemMapper(
                                     return original;
                                 }
 
-                                await attachmentMigrator.MigrateAttachment(attachment);
+                                var migrationResult = await attachmentMigrator.MigrateAttachment(attachment);
+                                if (migrationResult is not MigrateAttachmentResultContentItem { Success: true })
+                                {
+                                    logger.LogWarning("Attachment '{AttachmentGuid}' migration was skipped or failed. Preserving original link in HTML.", attachment.AttachmentGUID);
+                                    return original;
+                                }
 
                                 string? culture = null;
                                 if (attachment.AttachmentDocumentID is { } attachmentDocumentId)

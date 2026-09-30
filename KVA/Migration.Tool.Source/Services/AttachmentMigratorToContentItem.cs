@@ -5,6 +5,7 @@ using CMS.DataEngine;
 using Kentico.Xperience.UMT.Services;
 using Microsoft.Data.SqlClient;
 using Microsoft.Extensions.Logging;
+using Migration.Tool.Common;
 using Migration.Tool.Common.MigrationProtocol;
 using Migration.Tool.Common.Services;
 using Migration.Tool.Source.Auxiliary;
@@ -19,9 +20,53 @@ public class AttachmentMigratorToContentItem(
     EntityIdentityFacade entityIdentityFacade,
     IAssetFacade assetFacade,
     IImporter importer,
-    UserService userService
+    UserService userService,
+    ToolConfiguration toolConfiguration
 ) : IAttachmentMigrator
 {
+    private byte[]? TryGetAttachmentBinary(ICmsAttachment ksAttachment, ICmsSite site)
+    {
+        if (ksAttachment.AttachmentBinary != null)
+        {
+            return ksAttachment.AttachmentBinary;
+        }
+
+        if (!string.IsNullOrWhiteSpace(toolConfiguration.KxCmsDirPath) && Directory.Exists(toolConfiguration.KxCmsDirPath))
+        {
+            string guidStr = ksAttachment.AttachmentGUID.ToString();
+            string guidPrefix = guidStr.Length >= 2 ? guidStr[..2] : "";
+            string ext = ksAttachment.AttachmentExtension?.TrimStart('.') ?? "";
+            string fileNameWithExt = !string.IsNullOrEmpty(ext) ? $"{guidStr}.{ext}" : guidStr;
+
+            string[] candidatePaths = [
+                Path.Combine(toolConfiguration.KxCmsDirPath, site.SiteName, "files", guidPrefix, fileNameWithExt),
+                Path.Combine(toolConfiguration.KxCmsDirPath, site.SiteName, "files", fileNameWithExt),
+                Path.Combine(toolConfiguration.KxCmsDirPath, "App_Data", "Persistent", "CMSFiles", guidPrefix, fileNameWithExt),
+                Path.Combine(toolConfiguration.KxCmsDirPath, "App_Data", "CMSModules", "Content", "Attachments", fileNameWithExt),
+                Path.Combine(toolConfiguration.KxCmsDirPath, "CMSFiles", site.SiteName, guidPrefix, fileNameWithExt),
+                Path.Combine(toolConfiguration.KxCmsDirPath, "CMSFiles", guidPrefix, fileNameWithExt),
+                Path.Combine(toolConfiguration.KxCmsDirPath, "CMSFiles", fileNameWithExt)
+            ];
+
+            foreach (string path in candidatePaths)
+            {
+                if (File.Exists(path))
+                {
+                    try
+                    {
+                        logger.LogInformation("Attachment '{AttachmentName}' ({AttachmentGUID}) binary loaded from filesystem: {Path}", ksAttachment.AttachmentName, ksAttachment.AttachmentGUID, path);
+                        return File.ReadAllBytes(path);
+                    }
+                    catch (Exception ex)
+                    {
+                        logger.LogWarning(ex, "Failed to read attachment file from filesystem at {Path}", path);
+                    }
+                }
+            }
+        }
+
+        return null;
+    }
     public async Task<IMigrateAttachmentResult> TryMigrateAttachmentByPath(string documentPath, string additionalPath)
     {
         if (string.IsNullOrWhiteSpace(documentPath))
@@ -130,15 +175,36 @@ public class AttachmentMigratorToContentItem(
             logger.LogWarning("Attachment {Attachment} link will be broken, new guid {Guid} was required", new { ksAttachment.AttachmentSiteID, ksAttachment.AttachmentID, ksAttachment.AttachmentGUID }, newAttachmentGuid);
         }
 
-        if (ksAttachment.AttachmentBinary is null)
+        byte[]? binary = TryGetAttachmentBinary(ksAttachment, site);
+        if (binary is null)
         {
-            logger.LogError("Attachment binary data is null {Attachment} " +
-            "Option 1: Via admin web interface of your source instance navigate to the attachment and update the data. " +
-            "Option 2: Update the database directly - table CMS_Attachment, column AttachmentBinary. " +
-            "Option 3: Via admin web interface of your source instance remove all attachment references, then remove the attachment",
-            new { ksAttachment.AttachmentName, ksAttachment.AttachmentSiteID, ksAttachment.AttachmentID });
+            logger.LogWarning("Attachment binary data is null for '{AttachmentName}' (AttachmentSiteID: {AttachmentSiteID}, AttachmentID: {AttachmentID}, GUID: {AttachmentGUID}). " +
+                "KxCmsDirPath is empty or file not found on disk => skipping attachment migration. " +
+                "Option 1: Via admin web interface of your source instance navigate to the attachment and update the data. " +
+                "Option 2: Update the database directly - table CMS_Attachment, column AttachmentBinary. " +
+                "Option 3: Via admin web interface of your source instance remove all attachment references, then remove the attachment.",
+                ksAttachment.AttachmentName, ksAttachment.AttachmentSiteID, ksAttachment.AttachmentID, ksAttachment.AttachmentGUID);
 
-            throw new InvalidOperationException("Attachment data is null!");
+            protocol.Append(HandbookReferences.AttachmentBinaryDataIsNull.WithData(new
+            {
+                ksAttachment.AttachmentName,
+                ksAttachment.AttachmentSiteID,
+                ksAttachment.AttachmentID,
+                ksAttachment.AttachmentGUID
+            }));
+
+            return new MigrateAttachmentResultContentItem(false, null);
+        }
+
+        if (binary != ksAttachment.AttachmentBinary)
+        {
+            ksAttachment = ksAttachment switch
+            {
+                CmsAttachmentK11 a => a with { AttachmentBinary = binary },
+                CmsAttachmentK12 a => a with { AttachmentBinary = binary },
+                CmsAttachmentK13 a => a with { AttachmentBinary = binary },
+                _ => ksAttachment
+            };
         }
 
         // language of the migrated attachment = language of the document where the attachment is attached or default site language

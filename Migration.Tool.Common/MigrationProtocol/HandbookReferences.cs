@@ -23,6 +23,7 @@ public static class HandbookReferences
 
     public static HandbookReference TemporaryAttachmentMigrationIsNotSupported => new("TemporaryAttachmentMigrationIsNotSupported");
     public static HandbookReference NonUniqueEntityGuid => new("NonUniqueEntityGuid");
+    public static HandbookReference AttachmentBinaryDataIsNull => new("AttachmentBinaryDataIsNull");
 
     public static HandbookReference LinkedDataAlreadyMaterializedInTargetInstance =>
         new("LinkedDataAlreadyMaterializedInTargetInstance");
