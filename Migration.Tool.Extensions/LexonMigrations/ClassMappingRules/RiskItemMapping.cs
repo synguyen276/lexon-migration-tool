@@ -6,7 +6,7 @@ namespace Migration.Tool.Extensions.LexonMigrations.ClassMappingRules;
 /// <summary>
 /// Maps source Lexon.RiskItem to target Lexon.ResourceArea (Reusable Content Item).
 /// Also defines the companion wrapper page rule: Lexon.ResourceAreaPage wraps the reusable item,
-/// and child-link rules linking document groups, related resources, and updates.
+/// and child-link rules linking document groups and related resources.
 /// </summary>
 public static class RiskItemMapping
 {
@@ -19,7 +19,7 @@ public static class RiskItemMapping
         ReusableContentTypeName: LexonMigrationConstants.TargetClassNames.ResourceArea,
         WrapperClassName: LexonMigrationConstants.TargetClassNames.ResourceAreaPage,
         WrapperDisplayName: "Resource Area Page",
-        ContentItemReferenceField: LexonMigrationConstants.FieldNames.ContentItem,
+        ContentItemReferenceField: LexonMigrationConstants.FieldNames.ResourceAreaPageResource,
         IncludeLegacyMetadata: false
     );
 
@@ -27,7 +27,6 @@ public static class RiskItemMapping
     /// Child-linking rules originating from Lexon.RiskItem:
     /// - Document Groups (Lexon.riskattachmentset -> Lexon.ResourceAreaDocumentGroup)
     /// - Related Resources (Lexon.RiskItem via risklinkset -> Lexon.ResourceArea)
-    /// - Updates (Lexon.Bulletin via BulletinSet -> Lexon.ResourceAreaUpdate)
     /// </summary>
     public static readonly IReadOnlyList<LexonChildLinkRule> ChildLinkRules =
     [
@@ -43,13 +42,6 @@ public static class RiskItemMapping
             ChildClassName: LexonMigrationConstants.SourceClassNames.RiskItem,
             IntermediateClassName: LexonMigrationConstants.SourceClassNames.RiskLinkSet,
             FieldCaption: "Related Resources"
-        ),
-        new(
-            ParentClassName: LexonMigrationConstants.SourceClassNames.RiskItem,
-            TargetFieldName: LexonMigrationConstants.FieldNames.ResourceAreaUpdates,
-            ChildClassName: LexonMigrationConstants.SourceClassNames.Bulletin,
-            IntermediateClassName: LexonMigrationConstants.SourceClassNames.BulletinSet,
-            FieldCaption: "Updates"
         )
     ];
 
@@ -60,34 +52,46 @@ public static class RiskItemMapping
             LexonMigrationConstants.TargetClassNames.ResourceArea,
             "Resource Area");
 
-        m.BuildField("ResourceAreaID").AsPrimaryKey();
+        m.BuildField("ContentItemDataID").AsPrimaryKey();
 
-        m.BuildField(LexonMigrationConstants.FieldNames.Title)
-            .SetFrom(LexonMigrationConstants.SourceClassNames.RiskItem, LexonMigrationConstants.SourceFieldNames.ArticleTitle, true)
+        m.BuildField(LexonMigrationConstants.FieldNames.ResourceAreaTitle)
+            .ConvertFrom(LexonMigrationConstants.SourceClassNames.RiskItem, LexonMigrationConstants.SourceFieldNames.ArticleTitle, true,
+                (val, ctx) =>
+                {
+                    var title = val?.ToString()?.Trim();
+                    if (string.IsNullOrWhiteSpace(title))
+                    {
+                        return "Untitled Resource Area";
+                    }
+                    return title.Length > 500 ? title[..500] : title;
+                })
             .WithFieldPatch(f => { f.Caption = "Title"; f.AllowEmpty = false; });
 
-        m.BuildField(LexonMigrationConstants.FieldNames.Summary)
-            .SetFrom(LexonMigrationConstants.SourceClassNames.RiskItem, LexonMigrationConstants.SourceFieldNames.ArticleSummary, true)
-            .WithFieldPatch(f => { f.Caption = "Summary"; f.AllowEmpty = true; });
+        m.BuildField(LexonMigrationConstants.FieldNames.ResourceAreaSummary)
+            .ConvertFrom(LexonMigrationConstants.SourceClassNames.RiskItem, LexonMigrationConstants.SourceFieldNames.ArticleSummary, true,
+                (val, ctx) =>
+                {
+                    var summary = val?.ToString()?.Trim() ?? string.Empty;
+                    return summary.Length > 400 ? summary[..400] : summary;
+                })
+            .WithFieldPatch(f => { f.Caption = "Summary"; f.AllowEmpty = false; });
 
-        m.BuildField(LexonMigrationConstants.FieldNames.Text)
-            .SetFrom(LexonMigrationConstants.SourceClassNames.RiskItem, LexonMigrationConstants.SourceFieldNames.ArticleText, true)
-            .WithFieldPatch(f => { f.Caption = "Text"; f.AllowEmpty = true; });
+        m.BuildField(LexonMigrationConstants.FieldNames.ResourceAreaLastUpdated)
+            .ConvertFrom(LexonMigrationConstants.SourceClassNames.RiskItem, LexonMigrationConstants.SourceFieldNames.ArticleText, true,
+                (val, ctx) => LexonTaxonomyService.ExtractLastUpdated(val?.ToString(), ctx))
+            .WithFieldPatch(f => { f.Caption = "Last Updated"; f.AllowEmpty = false; });
 
-        m.BuildField(LexonMigrationConstants.FieldNames.Teaser)
-            .SetFrom(LexonMigrationConstants.SourceClassNames.RiskItem, LexonMigrationConstants.SourceFieldNames.ArticleTeaser, true)
-            .WithFieldPatch(f => { f.Caption = "Teaser"; f.AllowEmpty = true; });
-
-        m.BuildField(LexonMigrationConstants.FieldNames.Image)
-            .SetFrom(LexonMigrationConstants.SourceClassNames.RiskItem, LexonMigrationConstants.SourceFieldNames.ImagePath, true)
-            .WithFieldPatch(f => { f.Caption = "Image"; f.AllowEmpty = true; });
+        m.BuildField(LexonMigrationConstants.FieldNames.ResourceAreaBody)
+            .ConvertFrom(LexonMigrationConstants.SourceClassNames.RiskItem, LexonMigrationConstants.SourceFieldNames.ArticleText, true,
+                (val, ctx) => val?.ToString() ?? string.Empty)
+            .WithFieldPatch(f => { f.Caption = "Body"; f.AllowEmpty = false; });
 
         // ── Child-link reference fields (kept during mapping so they are not stripped) ──
         m.AddChildLinkField(LexonMigrationConstants.FieldNames.ResourceAreaDocumentGroups, "Document Groups");
         m.AddChildLinkField(LexonMigrationConstants.FieldNames.ResourceAreaRelatedResources, "Related Resources");
-        m.AddChildLinkField(LexonMigrationConstants.FieldNames.ResourceAreaUpdates, "Updates");
 
         return m;
     }
 }
+
 
