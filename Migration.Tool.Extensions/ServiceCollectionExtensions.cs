@@ -1,4 +1,5 @@
 using Microsoft.Extensions.DependencyInjection;
+using Migration.Tool.Common.Abstractions;
 using Migration.Tool.Extensions.CommunityMigrations;
 using Migration.Tool.Extensions.DefaultMigrations;
 using Migration.Tool.Extensions.LexonMigrations;
@@ -30,6 +31,10 @@ public static class ServiceCollectionExtensions
         // ───────────────────────────────────────────────────────────────────────
         services.AddTransient<ContentItemDirectorBase, LexonChildLinkDirector>();
         services.AddClassMappingRules();
+        services.AddSingleton(LexonTaxonomyService.Instance);
+        services.AddTransient(
+            typeof(MediatR.IPipelineBehavior<Migration.Tool.Common.MigratePagesCommand, CommandResult>),
+            typeof(LexonPrePageMigrationBehavior));
 
         // services.AddClassMergeExample();
         // services.AddClassMergeExampleAsReusable();

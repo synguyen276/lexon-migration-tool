@@ -5,5 +5,6 @@ internal class LinkedPageActionProvider : ILinkedPageActionProvider
 
     public void Drop() => Directive = new DropLinkedPageDirective();
     public void Materialize() => Directive = new MaterializeLinkedPageDirective();
-    public void StoreReferenceInAncestor(int parentLevel, string fieldName) => Directive = new StoreLinkedPageAsReferenceDirective { ParentLevel = parentLevel, FieldName = fieldName };
+    public void StoreReferenceInAncestor(int parentLevel, string fieldName, bool referenceWebsiteItem = false) =>
+        Directive = new StoreLinkedPageAsReferenceDirective { ParentLevel = parentLevel, FieldName = fieldName, ReferenceWebsiteItem = referenceWebsiteItem };
 }

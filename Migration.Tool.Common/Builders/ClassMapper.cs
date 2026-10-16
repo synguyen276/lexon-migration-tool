@@ -90,7 +90,7 @@ public class MultiClassMapping(string targetClassName, Action<DataClassInfo>? cl
     public IFieldMapping? GetMapping(string targetColumnName, string sourceClassName) => Mappings.SingleOrDefault(x => x.TargetFieldName.Equals(targetColumnName, StringComparison.InvariantCultureIgnoreCase) && x.SourceClassName.Equals(sourceClassName, StringComparison.InvariantCultureIgnoreCase));
 
     public string? GetTargetFieldName(string sourceColumnName, string sourceClassName) =>
-        Mappings.SingleOrDefault(x => x.SourceFieldName.Equals(sourceColumnName, StringComparison.InvariantCultureIgnoreCase) && x.SourceClassName.Equals(sourceClassName, StringComparison.InvariantCultureIgnoreCase)) switch
+        Mappings.FirstOrDefault(x => x.SourceFieldName.Equals(sourceColumnName, StringComparison.InvariantCultureIgnoreCase) && x.SourceClassName.Equals(sourceClassName, StringComparison.InvariantCultureIgnoreCase)) switch
         {
             { } m => m.TargetFieldName,
             _ => sourceColumnName

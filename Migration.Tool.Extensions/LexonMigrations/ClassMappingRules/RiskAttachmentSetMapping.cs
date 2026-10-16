@@ -16,7 +16,7 @@ public static class RiskAttachmentSetMapping
     [
         new(
             ParentClassName: LexonMigrationConstants.SourceClassNames.RiskAttachmentSet,
-            TargetFieldName: LexonMigrationConstants.FieldNames.ResourceAreaDocuments,
+            TargetFieldName: LexonMigrationConstants.FieldNames.ResourceAreaDocumentGroupDocuments,
             ChildClassName: LexonMigrationConstants.SourceClassNames.RiskAttachment,
             FieldCaption: "Documents"
         )
@@ -29,24 +29,26 @@ public static class RiskAttachmentSetMapping
             LexonMigrationConstants.TargetClassNames.ResourceAreaDocumentGroup,
             "Resource Area Document Group");
 
-        m.BuildField("ResourceAreaDocumentGroupID").AsPrimaryKey();
+        m.BuildField("ContentItemDataID").AsPrimaryKey();
 
-        m.BuildField(LexonMigrationConstants.FieldNames.Name)
-            .SetFrom(LexonMigrationConstants.SourceClassNames.RiskAttachmentSet, LexonMigrationConstants.SourceFieldNames.RiskSetName, true)
-            .WithFieldPatch(f => { f.Caption = "Name"; f.AllowEmpty = false; });
-
-        m.BuildField(LexonMigrationConstants.FieldNames.Description)
-            .SetFrom(LexonMigrationConstants.SourceClassNames.RiskAttachmentSet, LexonMigrationConstants.SourceFieldNames.Description, true)
-            .WithFieldPatch(f => { f.Caption = "Description"; f.AllowEmpty = true; });
-
-        m.BuildField(LexonMigrationConstants.FieldNames.MediaLibraryFolder)
-            .SetFrom(LexonMigrationConstants.SourceClassNames.RiskAttachmentSet, LexonMigrationConstants.SourceFieldNames.MLFolder, true)
-            .WithFieldPatch(f => { f.Caption = "Media Library Folder"; f.AllowEmpty = true; });
+        m.BuildField(LexonMigrationConstants.FieldNames.ResourceAreaDocumentGroupTitle)
+            .ConvertFrom(LexonMigrationConstants.SourceClassNames.RiskAttachmentSet, LexonMigrationConstants.SourceFieldNames.RiskSetName, true,
+                (val, ctx) =>
+                {
+                    var title = val?.ToString()?.Trim();
+                    if (string.IsNullOrWhiteSpace(title))
+                    {
+                        return "Untitled Document Group";
+                    }
+                    return title.Length > 500 ? title[..500] : title;
+                })
+            .WithFieldPatch(f => { f.Caption = "Title"; f.AllowEmpty = false; });
 
         // ── Child-link reference fields (kept during mapping so they are not stripped) ──
-        m.AddChildLinkField(LexonMigrationConstants.FieldNames.ResourceAreaDocuments, "Documents");
+        m.AddChildLinkField(LexonMigrationConstants.FieldNames.ResourceAreaDocumentGroupDocuments, "Documents");
 
         return m;
     }
 }
+
 

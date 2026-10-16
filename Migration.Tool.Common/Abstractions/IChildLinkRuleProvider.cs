@@ -9,7 +9,8 @@ public record ChildLinkRule(
     string TargetFieldName,
     string ChildClassName,
     string? IntermediateClassName = null,
-    string? FieldCaption = null
+    string? FieldCaption = null,
+    bool IsAncestorLink = false
 );
 
 /// <summary>

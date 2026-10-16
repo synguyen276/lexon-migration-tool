@@ -343,8 +343,24 @@ public class CmsClassMapper(
 
             Debug.WriteLineIf(oldPrimaryKeyName == null, $"WARN: old PK is null for class '{dataClass.ClassName}'");
 
+            if (dataClass.ClassContentTypeType == ClassContentTypeType.WEBSITE)
+            {
+                var docNameField = nfi.GetFormField("DocumentName")
+                    ?? nfi.GetFields(true, true).FirstOrDefault(f => GuidHelper.CreateFieldGuid($"documentname|{dataClass.ClassName}").Equals(f.Guid));
+                if (docNameField != null)
+                {
+                    nfi.RemoveFormField(docNameField.Name);
+                }
+            }
+
             foreach (var field in GetLegacyMetadataFields(version, includedMetadata))
             {
+                if (dataClass.ClassContentTypeType == ClassContentTypeType.WEBSITE &&
+                    field.LegacyFieldName.Equals("DocumentName", StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
                 AppendLegacyMetadataField(nfi, dataClass.ClassName, field, out mappedLegacyField);
             }
             dataClass.ClassFormDefinition = nfi.GetXmlDefinition();

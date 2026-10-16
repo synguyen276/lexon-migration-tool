@@ -425,12 +425,28 @@ public class MigratePageTypesCommandHandler(
         refField.Settings[FormDefinitionPatcher.AllowedContentItemTypeIdentifiers] = JsonConvert.SerializeObject(new[] { reusableClass.ClassGUID });
         refField.Settings[FormDefinitionPatcher.SettingsMaximumpages] = "1";
 
+        if (wrapperClass.ClassContentTypeType == ClassContentTypeType.WEBSITE)
+        {
+            var docNameField = fi.GetFormField("DocumentName")
+                ?? fi.GetFields(true, true).FirstOrDefault(f => GuidHelper.CreateFieldGuid($"documentname|{wrapperClass.ClassName}").Equals(f.Guid));
+            if (docNameField != null)
+            {
+                fi.RemoveFormField(docNameField.Name);
+            }
+        }
+
         if (rule.IncludeLegacyMetadata)
         {
             var version = modelFacade.SelectVersion();
             var includedMetadata = toolConfiguration.IncludeExtendedMetadata.GetValueOrDefault(false) ? CmsClassMapper.IncludedMetadata.Extended : CmsClassMapper.IncludedMetadata.Basic;
             foreach (var field in CmsClassMapper.GetLegacyMetadataFields(version, includedMetadata))
             {
+                if (wrapperClass.ClassContentTypeType == ClassContentTypeType.WEBSITE &&
+                    field.LegacyFieldName.Equals("DocumentName", StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
                 CmsClassMapper.AppendLegacyMetadataField(fi, wrapperClass.ClassName, field, out _);
             }
         }

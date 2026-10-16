@@ -18,5 +18,6 @@ public interface ILinkedPageActionProvider
     /// <param name="parentLevel">Relative level of the page to host the widget on. -1 is direct parent, -2 is grandparent, etc.</param>
     /// <param name="fieldName">Name of the field to store the reference in. If the field doesn't exist, it will be created. 
     /// If the field doesn't include the linked node's type in its allowed types, it will be added.</param>
-    public void StoreReferenceInAncestor(int parentLevel, string fieldName);
+    /// <param name="referenceWebsiteItem">If true, stores reference to the website page item GUID instead of resolving to any underlying reusable content item.</param>
+    public void StoreReferenceInAncestor(int parentLevel, string fieldName, bool referenceWebsiteItem = false);
 }

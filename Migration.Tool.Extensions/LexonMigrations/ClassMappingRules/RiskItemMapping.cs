@@ -86,6 +86,13 @@ public static class RiskItemMapping
                 (val, ctx) => val?.ToString() ?? string.Empty)
             .WithFieldPatch(f => { f.Caption = "Body"; f.AllowEmpty = false; });
 
+        m.BuildField(LexonMigrationConstants.FieldNames.ResourceAreaCategories)
+            .ConvertFrom(LexonMigrationConstants.SourceClassNames.RiskItem, LexonMigrationConstants.SourceFieldNames.DocumentName, true,
+                (val, ctx) => ctx is ConvertorTreeNodeContext treeNodeContext
+                    ? LexonTaxonomyService.Instance.GetParentCategoryTagJson(treeNodeContext.NodeGuid)
+                    : null)
+            .WithFieldPatch(f => { f.Caption = "Resource Categories"; f.AllowEmpty = true; });
+
         // ── Child-link reference fields (kept during mapping so they are not stripped) ──
         m.AddChildLinkField(LexonMigrationConstants.FieldNames.ResourceAreaDocumentGroups, "Document Groups");
         m.AddChildLinkField(LexonMigrationConstants.FieldNames.ResourceAreaRelatedResources, "Related Resources");

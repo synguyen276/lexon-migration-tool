@@ -11,8 +11,9 @@ public record LexonChildLinkRule(
     string TargetFieldName,
     string ChildClassName,
     string? IntermediateClassName = null,
-    string? FieldCaption = null
-) : ChildLinkRule(ParentClassName, TargetFieldName, ChildClassName, IntermediateClassName, FieldCaption);
+    string? FieldCaption = null,
+    bool IsAncestorLink = false
+) : ChildLinkRule(ParentClassName, TargetFieldName, ChildClassName, IntermediateClassName, FieldCaption, IsAncestorLink);
 
 public static class LexonChildLinkRules
 {
@@ -23,7 +24,8 @@ public static class LexonChildLinkRules
     public static readonly IReadOnlyList<LexonChildLinkRule> Rules =
     [
         ..RiskItemMapping.ChildLinkRules,
-        ..RiskAttachmentSetMapping.ChildLinkRules
+        ..RiskAttachmentSetMapping.ChildLinkRules,
+        ..BulletinMapping.ChildLinkRules
     ];
 }
 

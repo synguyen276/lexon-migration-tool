@@ -65,7 +65,7 @@ public class MigratePagesCommandHandler(
         cultureCodeToLanguageGuid = modelFacade.SelectAll<ICmsCulture>()
             .ToDictionary(c => c.CultureCode, c => c.CultureGUID, StringComparer.InvariantCultureIgnoreCase);
 
-        await MigratePages();
+        await MigratePages(request.Limit);
 
         await ExecDeferredVisualBuilderPatch();
 
@@ -194,11 +194,23 @@ public class MigratePagesCommandHandler(
 
     private string NormalizeUrlPath(string path) => path.ToLower().TrimStart('~').TrimStart('/').TrimEnd('/');
 
-    private async Task MigratePages()
+    private async Task MigratePages(int? pageLimit = null)
     {
+        if (pageLimit is > 0)
+        {
+            logger.LogInformation("Page migration limit set to {Limit} page(s)", pageLimit.Value);
+        }
+
         var sites = modelFacade.GetMigratedSites();
+        int migratedPagesCount = 0;
+
         foreach (var ksSite in sites)
         {
+            if (pageLimit.HasValue && migratedPagesCount >= pageLimit.Value)
+            {
+                break;
+            }
+
             var channelInfo = ChannelInfo.Provider.Get(ksSite.SiteGUID);
             if (channelInfo == null)
             {
@@ -220,11 +232,20 @@ public class MigratePagesCommandHandler(
 
             for (int pass = 0; pass < 2; pass++)
             {
+                if (pageLimit.HasValue && migratedPagesCount >= pageLimit.Value)
+                {
+                    break;
+                }
+
                 deferredTreeNodesService.Clear();
 
                 var linkTopoSortedNodes = new DeferrableItemEnumerableWrapper<ICmsTree>(ksTrees);   // needed to ensure link nodes are processed only after their linked-to targets
                 while (linkTopoSortedNodes.GetNext(out var ksTreeDefItem))
                 {
+                    if (pageLimit.HasValue && migratedPagesCount >= pageLimit.Value)
+                    {
+                        break;
+                    }
                     var ksTreeOriginal = ksTreeDefItem.Item;
                     logger.LogDebug("Page '{NodeAliasPath}' migration", ksTreeOriginal.NodeAliasPath);
 
@@ -466,6 +487,10 @@ public class MigratePagesCommandHandler(
                             {
                                 logger.LogTrace("No webpage item produced for '{NodeAliasPath}'", ksNode.NodeAliasPath);
                             }
+
+                            migratedPagesCount++;
+                            logger.LogInformation("Migrated page [{Current}/{Limit}]: '{NodeAliasPath}'",
+                                migratedPagesCount, pageLimit?.ToString() ?? "all", ksNode.NodeAliasPath);
                         }
                     }
 
@@ -477,6 +502,12 @@ public class MigratePagesCommandHandler(
                             .WithIdentityPrint(ksNode)
                         );
                         logger.LogError("Failed to import content item: {Exception}", ex);
+                    }
+
+                    if (pageLimit.HasValue && migratedPagesCount >= pageLimit.Value)
+                    {
+                        logger.LogInformation("Page migration limit of {Limit} reached. Stopping page migration.", pageLimit.Value);
+                        break;
                     }
                 }
                 ksTrees = deferredTreeNodesService.GetNodes();
@@ -492,12 +523,40 @@ public class MigratePagesCommandHandler(
 
     private void StoreLinkedNodeRef(ICmsTree ksNode, ICmsTree linkedNode, StoreLinkedPageAsReferenceDirective directive)
     {
-        var ksAncestorNode = modelFacade.LocateAncestor(ksNode, directive.ParentLevel) ?? throw new InvalidOperationException($"Ancestor not found");
-        var hostContentItem = ContentItemFromNode(ksAncestorNode) ?? throw new InvalidOperationException($"Content item or page migrated from source ancestor node NodeGUID={ksAncestorNode.NodeGUID} not found");
-        var hostClass = DataClassInfoProvider.GetDataClassInfo(hostContentItem.ContentItemContentTypeID) ?? throw new InvalidOperationException($"Ancestor node NodeGUID={ksAncestorNode.NodeGUID} is a folder and cannot be used to store the reference");
+        var ksAncestorNode = modelFacade.LocateAncestor(ksNode, directive.ParentLevel);
+        if (ksAncestorNode is null)
+        {
+            logger.LogWarning("Ancestor at level {ParentLevel} not found for node {NodeGUID}", directive.ParentLevel, ksNode.NodeGUID);
+            return;
+        }
 
-        var linkedContentItem = ContentItemFromNode(linkedNode) ?? throw new InvalidOperationException($"Linked content item not found for NodeGUID={linkedNode.NodeGUID}");
-        var linkedNodeClass = DataClassInfoProvider.GetDataClassInfo(linkedContentItem.ContentItemContentTypeID) ?? throw new InvalidOperationException($"Data class not found for ContentItemContentTypeID={linkedContentItem.ContentItemContentTypeID}");
+        var hostContentItem = ContentItemFromNode(ksAncestorNode);
+        if (hostContentItem is null)
+        {
+            logger.LogWarning("Content item or page migrated from source ancestor node NodeGUID={AncestorGuid} not found for node {NodeGUID}", ksAncestorNode.NodeGUID, ksNode.NodeGUID);
+            return;
+        }
+
+        var hostClass = DataClassInfoProvider.GetDataClassInfo(hostContentItem.ContentItemContentTypeID);
+        if (hostClass is null)
+        {
+            logger.LogWarning("Ancestor node NodeGUID={AncestorGuid} is a folder or missing data class and cannot be used to store reference for node {NodeGUID}", ksAncestorNode.NodeGUID, ksNode.NodeGUID);
+            return;
+        }
+
+        var linkedContentItem = ContentItemFromNode(linkedNode);
+        if (linkedContentItem is null)
+        {
+            logger.LogWarning("Linked content item not found for NodeGUID={LinkedNodeGuid}", linkedNode.NodeGUID);
+            return;
+        }
+
+        var linkedNodeClass = DataClassInfoProvider.GetDataClassInfo(linkedContentItem.ContentItemContentTypeID);
+        if (linkedNodeClass is null)
+        {
+            logger.LogWarning("Data class not found for ContentItemContentTypeID={ContentTypeID} (linked node {LinkedNodeGuid})", linkedContentItem.ContentItemContentTypeID, linkedNode.NodeGUID);
+            return;
+        }
 
         // If host or linked item was created via a wrapper page rule, resolve to the underlying reusable content item
         var ancestorSourceClass = GetCmsClass(ksAncestorNode.NodeClassID);
@@ -512,7 +571,8 @@ public class MigratePagesCommandHandler(
         }
 
         var linkedSourceClass = GetCmsClass(linkedNode.NodeClassID);
-        if (wrapperRuleProvider?.TryGetRule(linkedSourceClass.ClassName, out var linkedWrapperRule) == true && linkedWrapperRule != null)
+        if (!directive.ReferenceWebsiteItem &&
+            wrapperRuleProvider?.TryGetRule(linkedSourceClass.ClassName, out var linkedWrapperRule) == true && linkedWrapperRule != null)
         {
             var linkedReusableGuid = GuidHelper.CreateContentItemGuid($"reusable|{linkedContentItem.ContentItemGUID}");
             if (ContentItemInfo.Provider.Get(linkedReusableGuid) is { } reusableLinkedItem)
@@ -615,6 +675,39 @@ public class MigratePagesCommandHandler(
         return patchedDocument;
     }
 
+    private (Guid ContentItemGuid, Guid ClassGuid)? ResolveReferencedItem(ICmsTree node, Dictionary<Guid, NodeMapResult> mappedSiteNodes)
+    {
+        if (mappedSiteNodes.TryGetValue(node.NodeGUID, out var nodeMap) && nodeMap.ContentItemGuid != Guid.Empty && nodeMap.TargetClassInfo is not null)
+        {
+            return (nodeMap.ContentItemGuid, nodeMap.TargetClassInfo.ClassGUID);
+        }
+
+        var contentItem = ContentItemFromNode(node);
+        if (contentItem is null)
+        {
+            return null;
+        }
+
+        var targetClass = DataClassInfoProvider.GetDataClassInfo(contentItem.ContentItemContentTypeID);
+        var sourceClass = GetCmsClass(node.NodeClassID);
+        if (wrapperRuleProvider?.TryGetRule(sourceClass.ClassName, out var wrapperRule) == true && wrapperRule != null)
+        {
+            var reusableGuid = GuidHelper.CreateContentItemGuid($"reusable|{contentItem.ContentItemGUID}");
+            if (ContentItemInfo.Provider.Get(reusableGuid) is { } reusableItem)
+            {
+                contentItem = reusableItem;
+                targetClass = DataClassInfoProvider.GetDataClassInfo(contentItem.ContentItemContentTypeID) ?? targetClass;
+            }
+        }
+
+        if (targetClass is not null)
+        {
+            return (contentItem.ContentItemGUID, targetClass.ClassGUID);
+        }
+
+        return null;
+    }
+
     private async Task LinkChildren(Dictionary<Guid, NodeMapResult> mappedSiteNodes)
     {
         var itemsWithChildLinks = mappedSiteNodes.Values.Where(x => x.ChildLinks.Count != 0).ToList();
@@ -638,9 +731,9 @@ public class MigratePagesCommandHandler(
                 }
                 foreach (var (fieldName, node) in collection)
                 {
-                    if (mappedSiteNodes.TryGetValue(node.NodeGUID, out var childNodeMap) && childNodeMap.TargetClassInfo is not null)
+                    var resolved = ResolveReferencedItem(node, mappedSiteNodes);
+                    if (resolved is { ClassGuid: var childTargetType })
                     {
-                        var childTargetType = childNodeMap.TargetClassInfo.ClassGUID;
                         referenceFields[parentItem.TargetClassInfo.ClassName][collection.Key].allowedTypes.Add(childTargetType);
                     }
                 }
@@ -705,8 +798,9 @@ public class MigratePagesCommandHandler(
                 foreach (var childCollection in parentItem.ChildLinks.GroupBy(x => x.fieldName))
                 {
                     var guidArray = childCollection
-                        .Where(x => mappedSiteNodes.TryGetValue(x.node.NodeGUID, out var childMap) && childMap.ContentItemGuid != Guid.Empty)
-                        .Select(x => new { Identifier = mappedSiteNodes[x.node.NodeGUID].ContentItemGuid })
+                        .Select(x => ResolveReferencedItem(x.node, mappedSiteNodes))
+                        .Where(x => x is not null && x.Value.ContentItemGuid != Guid.Empty)
+                        .Select(x => new { Identifier = x!.Value.ContentItemGuid })
                         .ToArray();
 
                     // Skip fields where no matching children were resolved.
@@ -1259,11 +1353,13 @@ public class MigratePagesCommandHandler(
 
     private ContentLanguageInfo GetLanguageInfoByLanguageName(string languageName)
     {
-        var result = contentLanguageInfos.SingleOrDefault(x => x.ContentLanguageName.Equals(languageName, StringComparison.InvariantCultureIgnoreCase));
+        var result = contentLanguageInfos.SingleOrDefault(x => x.ContentLanguageName.Equals(languageName, StringComparison.InvariantCultureIgnoreCase) ||
+                                                               x.ContentLanguageCultureFormat.Equals(languageName, StringComparison.InvariantCultureIgnoreCase));
         if (result is null)
         {
             result = ContentLanguageInfo.Provider.Get().WhereEquals(nameof(ContentLanguageInfo.ContentLanguageName), languageName).SingleOrDefault()
-                ?? throw new InvalidOperationException($"Missing content language with name '{languageName}'");
+                     ?? ContentLanguageInfo.Provider.Get().WhereEquals(nameof(ContentLanguageInfo.ContentLanguageCultureFormat), languageName).SingleOrDefault()
+                     ?? throw new InvalidOperationException($"Missing content language with name or culture '{languageName}'");
             contentLanguageInfos.Add(result);
         }
         return result;

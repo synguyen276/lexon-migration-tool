@@ -187,6 +187,48 @@ public class ClassMappingProvider(
                 newDt.ClassFormDefinition = nfi.GetXmlDefinition();
             }
 
+            classMapping.PatchTargetDataClass(newDt);
+
+            if (newDt.ClassContentTypeType == ClassContentTypeType.WEBSITE)
+            {
+                var fi = new FormInfo(newDt.ClassFormDefinition);
+                var docField = fi.GetFormField("DocumentName");
+                if (docField != null)
+                {
+                    fi.RemoveFormField(docField.Name);
+                    newDt.ClassFormDefinition = fi.GetXmlDefinition();
+                }
+            }
+
+            if (!string.IsNullOrWhiteSpace(newDt.ClassTableName))
+            {
+                var tm = new TableManager(newDt.ClassConnectionString);
+                if (tm.TableExists(newDt.ClassTableName))
+                {
+                    if (newDt.ClassContentTypeType == ClassContentTypeType.WEBSITE)
+                    {
+                        var colInfo = tm.GetColumnInformation(newDt.ClassTableName, "DocumentName");
+                        if (colInfo?.Tables.Count > 0 && colInfo.Tables[0].Rows.Count > 0)
+                        {
+                            logger.LogInformation("Dropping obsolete column 'DocumentName' from table '{TableName}'", newDt.ClassTableName);
+                            tm.DropTableColumn(newDt.ClassTableName, "DocumentName");
+                        }
+                    }
+
+                    if (newDt.ClassName.Equals("Lexon.AreaOfPracticeLandingPage", StringComparison.OrdinalIgnoreCase))
+                    {
+                        var colInfo = tm.GetColumnInformation(newDt.ClassTableName, "ResourceAreaRelatedResources");
+                        if (colInfo?.Tables.Count > 0 && colInfo.Tables[0].Rows.Count > 0)
+                        {
+                            logger.LogInformation("Dropping obsolete column 'ResourceAreaRelatedResources' from table '{TableName}'", newDt.ClassTableName);
+                            tm.DropTableColumn(newDt.ClassTableName, "ResourceAreaRelatedResources");
+                        }
+                    }
+
+                    newDt.ClassXmlSchema = tm.GetXmlSchema(newDt.ClassTableName);
+                }
+            }
+
             DataClassInfoProvider.SetDataClassInfo(newDt);
             foreach (string sourceClassName in classMapping.SourceClassNames)
             {

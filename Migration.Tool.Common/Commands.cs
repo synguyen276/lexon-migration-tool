@@ -84,7 +84,7 @@ public record MigratePageTypesCommand : IRequest<CommandResult>, ICommand
     public Type[] Dependencies => [typeof(MigrateSitesCommand)];
 }
 
-public record MigratePagesCommand : IRequest<CommandResult>, ICommand
+public record MigratePagesCommand(int? Limit = null) : IRequest<CommandResult>, ICommand
 {
     public static readonly int Rank = 1 + MigrateSitesCommand.Rank + MigrateUsersCommand.Rank + MigratePageTypesCommand.Rank;
 

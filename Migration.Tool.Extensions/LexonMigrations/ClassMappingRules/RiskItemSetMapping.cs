@@ -1,49 +1,63 @@
-using Migration.Tool.Common.Abstractions;
+using CMS.FormEngine;
 using Migration.Tool.Common.Builders;
+using Migration.Tool.Common.Helpers;
 
 namespace Migration.Tool.Extensions.LexonMigrations.ClassMappingRules;
 
 /// <summary>
-/// Maps source Lexon.riskitemset to target Lexon.AreaOfPractice (Reusable Content Item).
-/// Also defines the companion wrapper page rule: Lexon.AreaOfPracticePage wraps the reusable item.
-/// Source fields: RiskSetName, ImagePath, Description.
+/// Maps source Lexon.riskitemset to target Lexon.AreaOfPracticePage (Website Page).
 /// </summary>
 public static class RiskItemSetMapping
 {
-    /// <summary>
-    /// Wrapper page rule: creates the Lexon.AreaOfPracticePage website-page wrapper
-    /// that holds a ContentItemReference to the Lexon.AreaOfPractice reusable item.
-    /// </summary>
-    public static readonly WrapperPageRule WrapperRule = new(
-        SourceClassName: LexonMigrationConstants.SourceClassNames.RiskItemSet,
-        ReusableContentTypeName: LexonMigrationConstants.TargetClassNames.AreaOfPractice,
-        WrapperClassName: LexonMigrationConstants.TargetClassNames.AreaOfPracticePage,
-        WrapperDisplayName: "Area of Practice Page",
-        ContentItemReferenceField: LexonMigrationConstants.FieldNames.ContentItem,
-        IncludeLegacyMetadata: false
-    );
-
     public static MultiClassMapping Create()
     {
-        var m = ClassRenameMapping.Reusable(
+        var m = ClassRenameMapping.WebsitePage(
             LexonMigrationConstants.SourceClassNames.RiskItemSet,
-            LexonMigrationConstants.TargetClassNames.AreaOfPractice,
-            "Area of Practice");
+            LexonMigrationConstants.TargetClassNames.AreaOfPracticePage,
+            "Area of Practice Page",
+            classPatcher: target =>
+            {
+                if (!string.IsNullOrWhiteSpace(target.ClassFormDefinition))
+                {
+                    var fi = new FormInfo(target.ClassFormDefinition);
+                    CleanFormDefinition(fi);
+                    target.ClassFormDefinition = fi.GetXmlDefinition();
+                }
+            });
 
-        m.BuildField("AreaOfPracticeID").AsPrimaryKey();
+        m.BuildField("ContentItemDataID").AsPrimaryKey();
 
-        m.BuildField(LexonMigrationConstants.FieldNames.Name)
-            .SetFrom(LexonMigrationConstants.SourceClassNames.RiskItemSet, LexonMigrationConstants.SourceFieldNames.RiskSetName, true)
-            .WithFieldPatch(f => { f.Caption = "Name"; f.AllowEmpty = false; });
-
-        m.BuildField(LexonMigrationConstants.FieldNames.Description)
-            .SetFrom(LexonMigrationConstants.SourceClassNames.RiskItemSet, LexonMigrationConstants.SourceFieldNames.Description, true)
-            .WithFieldPatch(f => { f.Caption = "Description"; f.AllowEmpty = true; });
-
-        m.BuildField(LexonMigrationConstants.FieldNames.Image)
-            .SetFrom(LexonMigrationConstants.SourceClassNames.RiskItemSet, LexonMigrationConstants.SourceFieldNames.ImagePath, true)
-            .WithFieldPatch(f => { f.Caption = "Image"; f.AllowEmpty = true; });
+        m.BuildField(LexonMigrationConstants.FieldNames.AreaOfPracticePagePageCategory)
+            .ConvertFrom(LexonMigrationConstants.SourceClassNames.RiskItemSet, LexonMigrationConstants.SourceFieldNames.DocumentName, true,
+                (val, ctx) =>
+                {
+                    var nodeName = val?.ToString()?.Trim();
+                    if (string.IsNullOrWhiteSpace(nodeName))
+                    {
+                        return null;
+                    }
+                    return LexonTaxonomyService.Instance.GetTagReferenceJson(nodeName);
+                })
+            .WithFieldPatch(f =>
+            {
+                f.Caption = "Resource Category";
+                f.AllowEmpty = true;
+                f.Guid = GuidHelper.CreateFieldGuid($"{LexonMigrationConstants.FieldNames.AreaOfPracticePagePageCategory.ToLower()}|{LexonMigrationConstants.TargetClassNames.AreaOfPracticePage}");
+            });
 
         return m;
     }
+
+    /// <summary>
+    /// Removes DocumentName from the AreaOfPracticePage form definition if present.
+    /// </summary>
+    public static void CleanFormDefinition(FormInfo fi)
+    {
+        if (fi.GetFormField(LexonMigrationConstants.SourceFieldNames.DocumentName) is { } docField)
+        {
+            fi.RemoveFormField(docField.Name);
+        }
+    }
 }
+
+

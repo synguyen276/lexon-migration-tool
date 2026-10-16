@@ -14,20 +14,26 @@ public static class RiskAttachmentMapping
             LexonMigrationConstants.TargetClassNames.ResourceAreaDocument,
             "Resource Area Document");
 
-        m.BuildField("ResourceAreaDocumentID").AsPrimaryKey();
+        m.BuildField("ContentItemDataID").AsPrimaryKey();
 
-        m.BuildField(LexonMigrationConstants.FieldNames.FileName)
-            .SetFrom(LexonMigrationConstants.SourceClassNames.RiskAttachment, LexonMigrationConstants.SourceFieldNames.FileName, true)
-            .WithFieldPatch(f => { f.Caption = "File Name"; f.AllowEmpty = true; });
+        m.BuildField(LexonMigrationConstants.FieldNames.ResourceAreaDocumentTitle)
+            .ConvertFrom(LexonMigrationConstants.SourceClassNames.RiskAttachment, LexonMigrationConstants.SourceFieldNames.FileName, true,
+                (val, ctx) =>
+                {
+                    var title = val?.ToString()?.Trim();
+                    if (string.IsNullOrWhiteSpace(title))
+                    {
+                        return "Untitled Document";
+                    }
+                    return title.Length > 500 ? title[..500] : title;
+                })
+            .WithFieldPatch(f => { f.Caption = "Document Title"; f.AllowEmpty = false; });
 
-        m.BuildField(LexonMigrationConstants.FieldNames.Attachment)
+        m.BuildField(LexonMigrationConstants.FieldNames.ResourceAreaDocumentFile)
             .SetFrom(LexonMigrationConstants.SourceClassNames.RiskAttachment, LexonMigrationConstants.SourceFieldNames.Attachment, true)
-            .WithFieldPatch(f => { f.Caption = "Attachment"; f.AllowEmpty = true; });
-
-        m.BuildField(LexonMigrationConstants.FieldNames.Description)
-            .SetFrom(LexonMigrationConstants.SourceClassNames.RiskAttachment, LexonMigrationConstants.SourceFieldNames.Description, true)
-            .WithFieldPatch(f => { f.Caption = "Description"; f.AllowEmpty = true; });
+            .WithFieldPatch(f => { f.Caption = "Document File"; f.AllowEmpty = true; });
 
         return m;
     }
 }
+

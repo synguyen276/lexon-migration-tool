@@ -28,10 +28,11 @@ public static class ClassRenameMapping
         string sourceClassName,
         string targetClassName,
         string targetDisplayName,
-        string? targetTableName = null)
+        string? targetTableName = null,
+        Action<DataClassInfo>? classPatcher = null)
     {
         return Create(sourceClassName, targetClassName, targetDisplayName, targetTableName,
-            ClassContentTypeType.REUSABLE, classWebPageHasUrl: false);
+            ClassContentTypeType.REUSABLE, classWebPageHasUrl: false, classPatcher);
     }
 
     /// <summary>
@@ -44,14 +45,16 @@ public static class ClassRenameMapping
     /// <param name="targetTableName">
     /// Optional explicit table name. When <c>null</c>, derived from <paramref name="targetClassName"/>.
     /// </param>
+    /// <param name="classPatcher">Optional action to customize the target <see cref="DataClassInfo"/>.</param>
     public static MultiClassMapping WebsitePage(
         string sourceClassName,
         string targetClassName,
         string targetDisplayName,
-        string? targetTableName = null)
+        string? targetTableName = null,
+        Action<DataClassInfo>? classPatcher = null)
     {
         return Create(sourceClassName, targetClassName, targetDisplayName, targetTableName,
-            ClassContentTypeType.WEBSITE, classWebPageHasUrl: true);
+            ClassContentTypeType.WEBSITE, classWebPageHasUrl: true, classPatcher);
     }
 
     /// <summary>
@@ -87,7 +90,8 @@ public static class ClassRenameMapping
         string targetDisplayName,
         string? targetTableName,
         string classContentTypeType,
-        bool classWebPageHasUrl)
+        bool classWebPageHasUrl,
+        Action<DataClassInfo>? classPatcher = null)
     {
         string tableName = targetTableName ?? DeriveTableName(targetClassName);
 
@@ -102,6 +106,8 @@ public static class ClassRenameMapping
             target.ClassType = ClassType.CONTENT_TYPE;
             target.ClassContentTypeType = classContentTypeType;
             target.ClassWebPageHasUrl = classWebPageHasUrl;
+
+            classPatcher?.Invoke(target);
         });
 
         // Register the source class so IsMatch() works

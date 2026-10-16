@@ -394,6 +394,12 @@ public class ContentItemMapper(
                 // Fields added globally
                 foreach (var legacyField in GetLegacyMetadataFields(modelFacade.SelectVersion()))
                 {
+                    if (targetClassInfo!.ClassContentTypeType == ClassContentTypeType.WEBSITE &&
+                        legacyField.LegacyFieldName.Equals("DocumentName", StringComparison.OrdinalIgnoreCase))
+                    {
+                        continue;
+                    }
+
                     if (GetMappedLegacyField(fi, targetClassInfo!.ClassName, legacyField.LegacyFieldName) is { } legacyMetadataFieldName)
                     {
                         if (reusableSchemaService.IsConversionToReusableFieldSchemaRequested(targetClassName))
@@ -607,12 +613,12 @@ public class ContentItemMapper(
         directive.Node = cmsTree;
         yield return directive;
 
-        foreach (var model in YieldWrapperPageModels(source, wrapperRule, wrapperClassInfo, wrapperContentItemGuid, reusableContentItemGuid))
+        foreach (var model in YieldReusableContentModels(source, sourceNodeClass, targetClassInfo, mapping, reusableContentItemGuid, directive))
         {
             yield return model;
         }
 
-        foreach (var model in YieldReusableContentModels(source, sourceNodeClass, targetClassInfo, mapping, reusableContentItemGuid, directive))
+        foreach (var model in YieldWrapperPageModels(source, wrapperRule, wrapperClassInfo, wrapperContentItemGuid, reusableContentItemGuid))
         {
             yield return model;
         }
@@ -728,6 +734,12 @@ public class ContentItemMapper(
                 var wrapperFi = new FormInfo(wrapperClassInfo.ClassFormDefinition);
                 foreach (var legacyField in GetLegacyMetadataFields(modelFacade.SelectVersion()))
                 {
+                    if (wrapperClassInfo.ClassContentTypeType == ClassContentTypeType.WEBSITE &&
+                        legacyField.LegacyFieldName.Equals("DocumentName", StringComparison.OrdinalIgnoreCase))
+                    {
+                        continue;
+                    }
+
                     if (GetMappedLegacyField(wrapperFi, wrapperClassInfo.ClassName, legacyField.LegacyFieldName) is { } legacyMetadataFieldName)
                     {
                         wrapperDataModel.CustomProperties[legacyMetadataFieldName] = legacyField.GetValue(cmsDocument);
@@ -853,8 +865,38 @@ public class ContentItemMapper(
                 }
             }
 
+            // Map legacy metadata fields
+            // Fields from custom class mapping
+            if (mapping is not null)
+            {
+                foreach (var fieldMapping in mapping.Mappings)
+                {
+                    var sourceField =
+                        legacyMetadataFields.Value.FirstOrDefault(x => x.LegacyFieldName == fieldMapping.SourceFieldName);
+                    if (sourceField is not null)
+                    {
+                        GetFieldMappingValueConvertor(fieldMapping, out var valueConvertor);
+                        var value = valueConvertor(sourceField.GetValue(cmsDocument), convertorContext);
+                        if (commonFields.Any(x => x.Name == fieldMapping.TargetFieldName))
+                        {
+                            commonDataModel.CustomProperties[fieldMapping.TargetFieldName] = value;
+                        }
+                        else
+                        {
+                            dataModel.CustomProperties[fieldMapping.TargetFieldName] = value;
+                        }
+                    }
+                }
+            }
+
             foreach (var legacyField in GetLegacyMetadataFields(modelFacade.SelectVersion()))
             {
+                if (targetClassInfo.ClassContentTypeType == ClassContentTypeType.WEBSITE &&
+                    legacyField.LegacyFieldName.Equals("DocumentName", StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
                 if (GetMappedLegacyField(fi, targetClassInfo.ClassName, legacyField.LegacyFieldName) is { } legacyMetadataFieldName)
                 {
                     dataModel.CustomProperties[legacyMetadataFieldName] = legacyField.GetValue(cmsDocument);

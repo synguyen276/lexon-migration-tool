@@ -25,6 +25,8 @@ public class CommandParser : ICommandParser
         }
 
         var subcommands = new List<ICommand>();
+        int? pageLimit = null;
+
         while (args.TryDequeue(out string? arg))
         {
             if (arg.IsIn("help", "h"))
@@ -47,6 +49,21 @@ public class CommandParser : ICommandParser
 
             if (arg == "--nowait")
             {
+                continue;
+            }
+
+            if (TryParsePageLimit(arg, args, out int parsedLimit))
+            {
+                pageLimit = parsedLimit;
+                bypassDependencyCheck = true;
+                for (int i = 0; i < subcommands.Count; i++)
+                {
+                    if (subcommands[i] is MigratePagesCommand)
+                    {
+                        subcommands[i] = new MigratePagesCommand(pageLimit);
+                    }
+                }
+                subcommands.RemoveAll(x => x is MigrateAttachmentsCommand);
                 continue;
             }
 
@@ -83,8 +100,11 @@ public class CommandParser : ICommandParser
 
             if (arg == $"--{MigratePagesCommand.Moniker}")
             {
-                subcommands.Add(new MigratePagesCommand());
-                subcommands.Add(new MigrateAttachmentsCommand());
+                subcommands.Add(new MigratePagesCommand(pageLimit));
+                if (!pageLimit.HasValue)
+                {
+                    subcommands.Add(new MigrateAttachmentsCommand());
+                }
                 continue;
             }
 
@@ -151,7 +171,41 @@ public class CommandParser : ICommandParser
             throw new InvalidOperationException($"Unknown command '{arg}'");
         }
 
+        if (pageLimit.HasValue && !subcommands.OfType<MigratePagesCommand>().Any())
+        {
+            subcommands.Add(new MigratePagesCommand(pageLimit));
+        }
+
         return (command, subcommands);
+    }
+
+    private static bool TryParsePageLimit(string arg, Queue<string> args, out int limit)
+    {
+        limit = 0;
+
+        // Handle --limit=N, --pages-limit=N, --page-limit=N, --count=N
+        if (arg.StartsWith("--limit=", StringComparison.OrdinalIgnoreCase) ||
+            arg.StartsWith("--pages-limit=", StringComparison.OrdinalIgnoreCase) ||
+            arg.StartsWith("--page-limit=", StringComparison.OrdinalIgnoreCase) ||
+            arg.StartsWith("--count=", StringComparison.OrdinalIgnoreCase))
+        {
+            string valStr = arg[(arg.IndexOf('=') + 1)..];
+            if (int.TryParse(valStr, out limit) && limit > 0)
+            {
+                return true;
+            }
+        }
+
+        // Handle --limit N, --pages-limit N, --page-limit N, --count N, -n N
+        if (arg is "--limit" or "--pages-limit" or "--page-limit" or "--take" or "--count" or "-n")
+        {
+            if (args.TryDequeue(out string? nextVal) && int.TryParse(nextVal, out limit) && limit > 0)
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private void PrintCommandDescriptions()
@@ -159,7 +213,7 @@ public class CommandParser : ICommandParser
         Console.WriteLine($"Command {Green("migrate")}: Migrates data from legacy Kentico CMS project to XbyK project");
         Console.WriteLine("Subcommands:");
         WriteCommandDesc($"starts migration of {Green(MigratePageTypesCommand.MonikerFriendly)}", $"migrate --{MigratePageTypesCommand.Moniker}");
-        WriteCommandDesc($"starts migration of {Green(MigratePagesCommand.MonikerFriendly)}", $"migrate --{MigratePagesCommand.Moniker}");
+        WriteCommandDesc($"starts migration of {Green(MigratePagesCommand.MonikerFriendly)} (supports --limit <n> to migrate only N pages; default will migrate all)", $"migrate --{MigratePagesCommand.Moniker} [--limit <n>]");
         WriteCommandDesc($"starts migration of {Green(MigrateCategoriesCommand.MonikerFriendly)}", $"migrate --{MigrateCategoriesCommand.Moniker}");
         WriteCommandDesc($"starts migration of {Green(MigrateSettingKeysCommand.MonikerFriendly)}", $"migrate --{MigrateSettingKeysCommand.Moniker}");
         WriteCommandDesc($"starts migration of {Green(MigrateContactManagementCommand.MonikerFriendly)}", $"migrate --{MigrateContactManagementCommand.Moniker}");

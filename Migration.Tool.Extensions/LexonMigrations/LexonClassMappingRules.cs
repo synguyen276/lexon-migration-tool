@@ -40,7 +40,6 @@ public static class LexonClassMappingRules
     /// </summary>
     public static readonly IReadOnlyList<WrapperPageRule> WrapperRules =
     [
-        RiskItemSetMapping.WrapperRule,
         RiskItemMapping.WrapperRule,
     ];
 
